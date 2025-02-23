@@ -1,3 +1,20 @@
+import numpy as np
+import struct
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+
+with open("SegActi-45x201x201x614.bin", "rb") as f:
+    w = 45
+    x = 201
+    y = 201
+    z = 614
+    num_elements = w * x * y * z
+    data = np.frombuffer(f.read(num_elements * 4), dtype="f4").reshape(w, x, y, z)
+    data = np.array(data)
+    data /= np.max(np.abs(data), axis=(1,2), keepdims=True) + 1e-9
+
+
 def get_random_chunk(data, chunk_size=32, min_z=200):
     """
     Select a random 32x32 spatial chunk from a 4D array, only from deeper sections.
@@ -46,7 +63,7 @@ def get_random_chunk(data, chunk_size=32, min_z=200):
 
 def rotate_chunk(chunk):
     """
-    Randomly rotate a chunk in one of 8 possible ways (4 rotations × 2 flips).
+    Randomly rotate a chunk in one of 8 possible ways, then possibly mirror along any axis.
     
     Parameters:
     -----------
@@ -56,9 +73,9 @@ def rotate_chunk(chunk):
     Returns:
     --------
     rotated_chunk : np.ndarray
-        Rotated version of the input chunk
-    rotation_type : str 
-        Description of the applied rotation
+        Rotated and possibly mirrored version of the input chunk
+    transformation : str 
+        Description of the applied transformations
     """
     # Choose random rotation (0, 90, 180, or 270 degrees)
     k_rotations = np.random.randint(0, 4)  # Number of 90-degree rotations
@@ -67,28 +84,38 @@ def rotate_chunk(chunk):
     do_flip = np.random.choice([True, False])
     
     # Create a copy to avoid modifying the original
-    rotated = chunk.copy()
+    transformed = chunk.copy()
     
     # Apply rotation (rotate around the spatial dimensions)
     if k_rotations > 0:
         # For each w and z slice, rotate the x-y plane
         for w_idx in range(chunk.shape[0]):
             for z_idx in range(chunk.shape[3]):
-                rotated[w_idx, :, :, z_idx] = np.rot90(
+                transformed[w_idx, :, :, z_idx] = np.rot90(
                     chunk[w_idx, :, :, z_idx], 
                     k=k_rotations
                 )
     
-    # Apply flip if selected
+    # Apply initial flip if selected
     if do_flip:
-        rotated = np.flip(rotated, axis=2)  # Flip along y-axis
+        transformed = np.flip(transformed, axis=2)  # Flip along y-axis
     
-    # Create description of the transformation
+    # Create description of the initial transformation
     rotation_degrees = k_rotations * 90
     flip_text = " and flipped" if do_flip else ""
     transformation = f"Rotated {rotation_degrees}°{flip_text}"
     
-    return rotated, transformation
+    # 50% chance for additional mirroring
+    if np.random.choice([True, False]):
+        # Choose which axis to mirror along (0=w, 1=x, 2=y, 3=z)
+        mirror_axis = np.random.randint(0, 4)
+        transformed = np.flip(transformed, axis=mirror_axis)
+        
+        # Add mirroring description
+        axis_names = {0: 'w', 1: 'x', 2: 'y', 3: 'z'}
+        transformation += f", mirrored along {axis_names[mirror_axis]}-axis"
+    
+    return transformed, transformation
 
 # Example usage:
 # Get a deep chunk
