@@ -176,8 +176,8 @@ device = torch.device("cpu")
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=1e-4, betas=(0.0, 0.9))
-optimizer_D = optim.AdamW(D.parameters(), lr=2e-4, betas=(0.0, 0.9))
+optimizer_G = optim.AdamW(G.parameters(), lr=5e-5, betas=(0.0, 0.9))
+optimizer_D = optim.AdamW(D.parameters(), lr=1e-4, betas=(0.0, 0.9))
 loss_function = nn.BCELoss()
 
 transform = transforms.Compose([
@@ -210,7 +210,7 @@ for epoch in range(1, epochs + 1):
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, 1.0)
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, 0.1)
     D_loss.backward()
     optimizer_D.step()
 
