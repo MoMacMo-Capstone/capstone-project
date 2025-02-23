@@ -46,6 +46,7 @@ def get_random_chunk(data, chunk_size=32, min_z=200):
     if min_z >= z:
         raise ValueError(f"min_z ({min_z}) must be less than z dimension size ({z})")
     
+
     # Calculate valid ranges for random selection
     max_x = x - chunk_size + 1
     max_y = y - chunk_size + 1
@@ -127,3 +128,69 @@ print(f"Chunk location: x={x_start}:{x_start+32}, y={y_start}:{y_start+32}, z={z
 rotated_chunk, transformation = rotate_chunk(chunk)
 print(f"Transformation applied: {transformation}")
 print(f"Rotated chunk shape: {rotated_chunk.shape}")
+
+
+def generate_mask_boxes(num_boxes, box_width, box_height, mask_width, mask_height):
+    """
+    Generate random box positions to create a mask within specified dimensions.
+    
+    Parameters:
+    -----------
+    num_boxes : int
+        Number of boxes to generate
+    box_width : int
+        Width of each box
+    box_height : int
+        Height of each box
+    mask_width : int
+        Total width of the mask area
+    mask_height : int
+        Total height of the mask area
+        
+    Returns:
+    --------
+    boxes : list
+        List of tuples containing (x, y) coordinates for top-left corner of each box
+    """
+    # Input validation
+    if box_width > mask_width or box_height > mask_height:
+        raise ValueError("Box dimensions cannot be larger than mask dimensions")
+    
+    # Calculate valid ranges for box placement
+    max_x = mask_width - box_width
+    max_y = mask_height - box_height
+    
+    # Generate random box positions
+    boxes = []
+    for _ in range(num_boxes):
+        x = np.random.randint(0, max_x + 1)
+        y = np.random.randint(0, max_y + 1)
+        boxes.append((x, y))
+    
+    return boxes
+
+# Example usage:
+mask_width = 100
+mask_height = 100
+box_width = 20
+box_height = 20
+num_boxes = 5
+
+box_positions = generate_mask_boxes(num_boxes, box_width, box_height, mask_width, mask_height)
+print("Box positions (x, y):", box_positions)
+
+# Optional: Create a binary mask from the boxes
+def create_binary_mask(box_positions, box_width, box_height, mask_width, mask_height):
+    """Convert box positions to a binary mask."""
+    mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
+    for x, y in box_positions:
+        mask[y:y+box_height, x:x+box_width] = 1
+    return mask
+
+# Create and visualize the mask
+mask = create_binary_mask(box_positions, box_width, box_height, mask_width, mask_height)
+plt.imshow(mask, cmap='gray')
+plt.title('Generated Mask')
+plt.show()
+
+
