@@ -4,6 +4,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import matplotlib
+from torch.utils.tensorboard import SummaryWriter
+import torchvision
 from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
@@ -22,12 +24,15 @@ class ResidualBlock(nn.Module):
         return z + self.block(z)
 
 class DBlock(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, in_channels, out_channels):
         super(DBlock, self).__init__()
         self.block = nn.Sequential(
-            ResidualBlock(channels),
-            ResidualBlock(channels),
+            ResidualBlock(in_channels),
+            ResidualBlock(in_channels),
         )
+
+        if in_channels != out_channels:
+            self.block.append(nn.Conv2d(in_channels, out_channels, 3, bias=False, padding = 1))
 
     def forward(self, z):
         return nn.functional.interpolate(self.block(z), scale_factor=0.5, mode="bilinear")
@@ -35,8 +40,8 @@ class DBlock(nn.Module):
 class GBlock(nn.Module):
     def __init__(self, channels, resolution):
         super(GBlock, self).__init__()
-        self.input = ResidualBlock(channels)
-        self.output = ResidualBlock(channels)
+        self.input = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
+        self.output = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
         self.resolution = resolution
 
         self.inner = None
@@ -89,15 +94,12 @@ class Discriminator(nn.Module):
 
         self.model = nn.Sequential(
             nn.Conv2d(2, latent_dim, 1),
-            DBlock(latent_dim),
-            nn.Conv2d(latent_dim, latent_dim * 2, 3, bias=False, padding=1),
-            DBlock(latent_dim * 2),
-            nn.Conv2d(latent_dim * 2, latent_dim * 4, 3, bias=False, padding=1),
-            DBlock(latent_dim * 4),
-            nn.Conv2d(latent_dim * 4, latent_dim * 8, 3, bias=False, padding=1),
-            DBlock(latent_dim * 8),
+            DBlock(latent_dim, latent_dim * 2),
+            DBlock(latent_dim * 2, latent_dim * 4),
+            DBlock(latent_dim * 4, latent_dim * 8),
+            DBlock(latent_dim * 8, latent_dim * 16),
             nn.Flatten(),
-            nn.Linear(latent_dim * 8, 1),
+            nn.Linear(latent_dim * 16, 1),
         )
 
     def forward(self, inpainted, mask):
@@ -176,8 +178,8 @@ device = torch.device("cpu")
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=5e-5, betas=(0.0, 0.9))
-optimizer_D = optim.AdamW(D.parameters(), lr=1e-4, betas=(0.0, 0.9))
+optimizer_G = optim.AdamW(G.parameters(), lr=5e-4, betas=(0.0, 0.9))
+optimizer_D = optim.AdamW(D.parameters(), lr=5e-4, betas=(0.0, 0.9))
 loss_function = nn.BCELoss()
 
 transform = transforms.Compose([
@@ -187,10 +189,7 @@ transform = transforms.Compose([
 train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
 train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 fid_metric = FrechetInceptionDistance(feature = 2048)
-
-def interpolate(epoch, start, end):
-    a = epoch / (epochs - 1)
-    return start * (1 - a) + end * a
+writer = SummaryWriter()
 
 mask = torch.zeros((batch_size, 1, 28, 28), device=device).to(torch.bool)
 mask[:,:,9:21,9:21] = 1
@@ -205,7 +204,9 @@ for epoch in range(1, epochs + 1):
     real_logits = D(real_imgs, mask)
 
     optimizer_G.zero_grad()
-    G_loss = generator_loss(D, fake_imgs, real_logits, mask)
+    adv_loss = generator_loss(D, fake_imgs, real_logits, mask)
+    rec_loss = nn.functional.l1_loss(fake_imgs, real_imgs)
+    G_loss = adv_loss + rec_loss * 100.
     G_loss.backward()
     optimizer_G.step()
 
@@ -215,9 +216,16 @@ for epoch in range(1, epochs + 1):
     optimizer_D.step()
 
     if epoch % 10 == 0:
-        save_image_rows(f"fig_2_{epoch:05}.png", [real_imgs, real_imgs.masked_fill(mask, 0), fake_imgs])
+        # save_image_rows(f"fig_2_{epoch:05}.png", [real_imgs, real_imgs.masked_fill(mask, 0), fake_imgs])
+        writer.add_images('Real Images', real_imgs, epoch)
+        writer.add_images('Masked Images', real_imgs.masked_fill(mask, 0), epoch)
+        writer.add_images('Fake Images', fake_imgs, epoch)
 
-    print(f"Epoch {epoch}/{epochs}: D Loss: {D_loss.item()}, G Loss: {G_loss.item()}")
+    print(f"Epoch {epoch}/{epochs}: D Loss: {D_loss.item()}, G Loss: {adv_loss.item()}, rec loss: {rec_loss.item()}")
+
+    writer.add_scalar("Discriminator Loss", D_loss.item(), epoch)
+    writer.add_scalar("Generator Loss", adv_loss.item(), epoch)
+    writer.add_scalar("Reconstruction Loss", rec_loss.item(), epoch)
 
     if epoch % 200 == 0:
         fid_metric.update((real_imgs * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = True)
