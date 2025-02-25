@@ -10,7 +10,10 @@ def get_random_chunk(data, chunk_size=32):
     y = np.random.randint(0, data.shape[2] - chunk_size)
     z = np.random.randint(200, data.shape[3])
 
-    return data[w, x:x + chunk_size, y:y + chunk_size, z]
+    chunk = data[w, x:x + chunk_size, y:y + chunk_size, z]
+    chunk /= np.max(chunk) + 1e-9
+
+    return chunk
 
 def random_rotate_and_mirror(chunk):
     k = np.random.randint(0, 4)
@@ -60,30 +63,17 @@ def mask_random_boxes(num_boxes, box_width, box_height, mask_width, mask_height)
 
     return mask
 
-# Example usage:
-mask_width = 100
-mask_height = 100
-box_width = 20
-box_height = 20
-num_boxes = 5
+with open("SegActi-45x201x201x614.bin", "rb") as f:
+    # Read dimensions (3 integers as big-endian)
+    w = 45
+    x = 201
+    y = 201
+    z = 614
+    num_elements = w * x * y * z
+    data = np.frombuffer(f.read(num_elements * 4), dtype="f4").reshape(w, x, y, z)
 
-mask = mask_random_boxes(num_boxes, box_width, box_height, mask_width, mask_height)
-plt.imshow(mask, cmap='gray')
-plt.title('Generated Mask')
-plt.show()
+data = np.array(data)
+data /= np.max(np.abs(data), axis=(1,2), keepdims=True) + 1e-9
 
-'''
-# Test parameters
-shape = (32, 32)  
-pixel_dropout = 25
-
-# Generate the mask
-mask = mask_random_pixels(shape, pixel_dropout)
-
-# Plot the mask
-plt.figure(figsize=(5, 5))
-plt.imshow(mask, cmap="gray")
-plt.title(f"{pixel_dropout}%")
-plt.colorbar()
-plt.show()
-'''
+def get_chunk(chunk_size=32):
+    return random_rotate_and_mirror(get_random_chunk(data, chunk_size))

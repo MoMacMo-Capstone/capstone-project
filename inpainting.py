@@ -9,6 +9,9 @@ import torchvision
 from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
+import numpy as np
+import mask_functions
+
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
@@ -27,6 +30,8 @@ class DBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DBlock, self).__init__()
         self.block = nn.Sequential(
+            ResidualBlock(in_channels),
+            ResidualBlock(in_channels),
             ResidualBlock(in_channels),
             ResidualBlock(in_channels),
         )
@@ -137,38 +142,21 @@ def discriminator_loss(discriminator, fake_samples, real_samples, real_logits, m
     discriminator_loss = adversarial_loss + (gamma / 2) * (r1_penalty + r2_penalty)
     return discriminator_loss.mean()
 
-def image_rows(imgs, num_images=10):
-    np = [img.detach().cpu().numpy() for img in imgs]
-    fig, axes = plt.subplots(len(np), num_images, figsize=(num_images, len(np)))
-    for i in range(len(np)):
-        for j in range(num_images):
-            axes[i][j].imshow(np[i][j, 0], cmap="seismic", norm=matplotlib.colors.NoNorm(-1, 1, clip=True))
-            axes[i][j].axis("off")
-    return fig
+def color_images(images):
+    return torch.cat([images.relu(), torch.zeros_like(images), (-images).relu()], dim=1)
 
-def save_image_rows(file, imgs, num_images=10):
-    fig = image_rows(imgs, num_images)
-    fig.savefig(file)
-    plt.close()
+def interpolate(epoch, epochs, start, end):
+    a = max(min(epoch / (epochs - 1), 1), 0)
+    return start * (1 - a) + end * a
 
-def show_image_rows(imgs, num_images=10):
-    fig = image_rows(imgs, num_images)
-    fig.show()
-    plt.close()
+def interpolate_exponential(x, x0, x1, y0, y1):
+    if x <= x0:
+        return y0
+    elif x >= x1:
+        return y1
 
-def show_images(imgs, num_images=10):
-    show_image_rows([imgs], num_images)
+    return y0 * (y1 / y0) ** ((x - x0) / (x1 - x0))
 
-def show_generated_images(generator, latent_dim, num_images=10):
-    generator.eval()
-    with torch.no_grad():
-        noise = torch.randn(num_images, latent_dim)
-        fake_imgs = generator(noise).cpu().numpy()
-
-    show_images(fake_imgs, num_images)
-    generator.train()
-
-epochs = 10000
 batch_size = 256
 latent_dim = 8
 
@@ -179,15 +167,15 @@ G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
 optimizer_G = optim.AdamW(G.parameters(), lr=5e-4, betas=(0.0, 0.9))
-optimizer_D = optim.AdamW(D.parameters(), lr=5e-4, betas=(0.0, 0.9))
+optimizer_D = optim.AdamW(D.parameters(), lr=1e-4, betas=(0.0, 0.9))
 loss_function = nn.BCELoss()
 
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
-train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
-train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
+# train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
+# train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 fid_metric_acc = FrechetInceptionDistance(feature = 2048)
 fid_metric = FrechetInceptionDistance(feature = 2048)
 writer = SummaryWriter()
@@ -195,10 +183,16 @@ writer = SummaryWriter()
 mask = torch.zeros((batch_size, 1, 28, 28), device=device).to(torch.bool)
 mask[:,:,9:21,9:21] = 1
 
-for epoch in range(1, epochs + 1):
-    optimizer_D.zero_grad()
+epoch = 0
 
-    real_imgs = next(iter(train_loader))[0]
+while True:
+    epoch += 1
+
+    # real_imgs = next(iter(train_loader))[0]
+
+    real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
+    real_imgs = torch.tensor(real_imgs)
+
     real_imgs = real_imgs.to(device).detach().requires_grad_(True)
     fake_imgs = G(real_imgs, mask)
 
@@ -207,7 +201,8 @@ for epoch in range(1, epochs + 1):
     optimizer_G.zero_grad()
     adv_loss = generator_loss(D, fake_imgs, real_logits, mask)
     rec_loss = nn.functional.l1_loss(fake_imgs, real_imgs)
-    G_loss = adv_loss + rec_loss * 100.
+    # G_loss = adv_loss + rec_loss * interpolate_exponential(epoch, 0, 1500, 1000, 1)
+    G_loss = adv_loss + rec_loss * 100
     G_loss.backward()
     optimizer_G.step()
 
@@ -223,14 +218,16 @@ for epoch in range(1, epochs + 1):
         fake_imgs[:32]
     ], 0)
     grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+    grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, epoch)
 
-    print(f"Epoch {epoch}/{epochs}: D Loss: {D_loss.item()}, G Loss: {adv_loss.item()}, rec loss: {rec_loss.item()}")
+    print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {adv_loss.item()}, rec loss: {rec_loss.item()}")
 
     writer.add_scalar("Loss/Discriminator Loss", D_loss.item(), epoch)
     writer.add_scalar("Loss/Generator Loss", adv_loss.item(), epoch)
     writer.add_scalar("Loss/Reconstruction Loss", rec_loss.item(), epoch)
+    # writer.add_scalar("Reconstruction Gamma", interpolate_exponential(epoch, 0, 1500, 1000, 10), epoch)
 
     if epoch % 200 == 0:
         fid_metric_acc.update((real_imgs * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = True)
@@ -240,3 +237,8 @@ for epoch in range(1, epochs + 1):
         fid_score = fid_metric.compute()
         print(f"FID: {fid_score}")
         writer.add_scalar("FID", fid_score.item(), epoch)
+        torch.save({
+            "generator": G.state_dict(),
+            "discriminator": D.state_dict(),
+            "epoch": epoch,
+        }, f"checkpoint_{epoch}.bin")
