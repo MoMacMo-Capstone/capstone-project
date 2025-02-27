@@ -2,15 +2,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
-import matplotlib
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
 from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-import numpy as np
-import mask_functions
+# import numpy as np
+# import mask_functions
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
@@ -98,7 +96,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.model = nn.Sequential(
-            nn.Conv2d(2, latent_dim, 1),
+            nn.Conv2d(3, latent_dim, 1),
             DBlock(latent_dim, latent_dim * 2),
             DBlock(latent_dim * 2, latent_dim * 4),
             DBlock(latent_dim * 4, latent_dim * 8),
@@ -107,40 +105,52 @@ class Discriminator(nn.Module):
             nn.Linear(latent_dim * 16, 1),
         )
 
-    def forward(self, inpainted, mask):
-        z = torch.cat([inpainted, mask], dim = 1);
+    def forward(self, inpainted_pair, mask):
+        z = torch.cat([inpainted_pair, mask], dim = 1);
         return self.model(z)
 
 def zero_centered_gradient_penalty(Samples, Critics):
     Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
-    return Gradient.square().sum([1, 2, 3])
+    return Gradient.square().sum([1, 2, 3]).mean()
 
 def masked_zero_centered_gradient_penalty(samples, critics, mask):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
-    grad = grad.masked_fill(mask, 0)
-    return grad.square().sum([1, 2, 3])
+    grad *= mask
+    return grad.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, fake_samples, real_logits, mask):
+def generator_loss(discriminator, fake_samples, real_samples, mask):
     fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
 
-    relativistic_logits = fake_logits - real_logits.detach()
-    adversarial_loss = nn.functional.softplus(-relativistic_logits)
+    relativistic_logits = fake_logits - real_logits
+    adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
 
-    return adversarial_loss.mean()
+    writer.add_scalar("Loss/Generator Loss", adversarial_loss.item(), epoch)
 
-def discriminator_loss(discriminator, fake_samples, real_samples, real_logits, mask, gamma):
+    return adversarial_loss
+
+def discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
     fake_samples = fake_samples.detach().requires_grad_(True)
+    real_samples = real_samples.detach().requires_grad_(True)
 
     fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
 
-    r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, ~mask)
-    r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, ~mask)
+    # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
+    # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+
+    r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
 
     relativistic_logits = real_logits - fake_logits
-    adversarial_loss = nn.functional.softplus(-relativistic_logits)
+    adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
+
+    writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), epoch)
+    writer.add_scalar("Loss/R1 Penalty", r1_penalty.item(), epoch)
+    writer.add_scalar("Loss/R2 Penalty", r2_penalty.item(), epoch)
 
     discriminator_loss = adversarial_loss + (gamma / 2) * (r1_penalty + r2_penalty)
-    return discriminator_loss.mean()
+    return discriminator_loss
 
 def color_images(images):
     return torch.cat([images.relu(), torch.zeros_like(images), (-images).relu()], dim=1)
@@ -166,7 +176,7 @@ device = torch.device("cpu")
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=5e-4, betas=(0.0, 0.9))
+optimizer_G = optim.AdamW(G.parameters(), lr=1e-4, betas=(0.0, 0.9))
 optimizer_D = optim.AdamW(D.parameters(), lr=1e-4, betas=(0.0, 0.9))
 loss_function = nn.BCELoss()
 
@@ -174,13 +184,13 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
-# train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
-# train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
+train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
+train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 fid_metric_acc = FrechetInceptionDistance(feature = 2048)
 fid_metric = FrechetInceptionDistance(feature = 2048)
 writer = SummaryWriter()
 
-mask = torch.zeros((batch_size, 1, 28, 28), device=device).to(torch.bool)
+mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
 mask[:,:,9:21,9:21] = 1
 
 epoch = 0
@@ -188,55 +198,49 @@ epoch = 0
 while True:
     epoch += 1
 
-    # real_imgs = next(iter(train_loader))[0]
+    real_imgs = next(iter(train_loader))[0]
 
-    real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
-    real_imgs = torch.tensor(real_imgs)
+    # real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
+    # real_imgs = torch.tensor(real_imgs)
 
     real_imgs = real_imgs.to(device).detach().requires_grad_(True)
     fake_imgs = G(real_imgs, mask)
 
-    real_logits = D(real_imgs, mask)
+    writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), epoch)
+    writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), epoch)
 
-    optimizer_G.zero_grad()
-    adv_loss = generator_loss(D, fake_imgs, real_logits, mask)
-    rec_loss = nn.functional.l1_loss(fake_imgs, real_imgs)
-    # G_loss = adv_loss + rec_loss * interpolate_exponential(epoch, 0, 1500, 1000, 1)
-    G_loss = adv_loss + rec_loss * 100
-    G_loss.backward()
-    optimizer_G.step()
+    real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, 0.1)
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, 0.1)
     D_loss.backward()
     optimizer_D.step()
 
-    # save_image_rows(f"fig_2_{epoch:05}.png", [real_imgs, real_imgs.masked_fill(mask, 0), fake_imgs])
+    optimizer_G.zero_grad()
+    G_loss = generator_loss(D, fake_imgs, real_imgs, mask)
+    G_loss.backward()
+    optimizer_G.step()
+
     grid = torch.cat([
-        real_imgs[:32],
-        real_imgs[:32].masked_fill(mask[:32], 0),
-        fake_imgs[:32]
+        real_imgs[:32, 0:1],
+        real_imgs[:32, 0:1].masked_fill(mask[:32, 0:1], 0),
+        fake_imgs[:32, 0:1]
     ], 0)
     grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, epoch)
 
-    print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {adv_loss.item()}, rec loss: {rec_loss.item()}")
-
-    writer.add_scalar("Loss/Discriminator Loss", D_loss.item(), epoch)
-    writer.add_scalar("Loss/Generator Loss", adv_loss.item(), epoch)
-    writer.add_scalar("Loss/Reconstruction Loss", rec_loss.item(), epoch)
-    # writer.add_scalar("Reconstruction Gamma", interpolate_exponential(epoch, 0, 1500, 1000, 10), epoch)
+    print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {G_loss.item()}")
 
     if epoch % 200 == 0:
-        fid_metric_acc.update((real_imgs * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = True)
+        fid_metric_acc.update((real_imgs[:, 0:1] * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = True)
         fid_metric.reset()
         fid_metric.merge_state(fid_metric_acc)
-        fid_metric.update((fake_imgs * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = False)
+        fid_metric.update((fake_imgs[:, 0:1] * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = False)
         fid_score = fid_metric.compute()
         print(f"FID: {fid_score}")
-        writer.add_scalar("FID", fid_score.item(), epoch)
+        writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
         torch.save({
             "generator": G.state_dict(),
             "discriminator": D.state_dict(),
