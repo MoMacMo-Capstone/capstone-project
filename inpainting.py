@@ -96,7 +96,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.model = nn.Sequential(
-            nn.Conv2d(3, latent_dim, 1),
+            nn.Conv2d(2, latent_dim, 1),
             DBlock(latent_dim, latent_dim * 2),
             DBlock(latent_dim * 2, latent_dim * 4),
             DBlock(latent_dim * 4, latent_dim * 8),
@@ -136,11 +136,11 @@ def discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
     fake_logits = discriminator(fake_samples, mask)
     real_logits = discriminator(real_samples, mask)
 
-    # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
-    # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+    r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
+    r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
 
-    r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
-    r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
+    # r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    # r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
 
     relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -167,6 +167,13 @@ def interpolate_exponential(x, x0, x1, y0, y1):
 
     return y0 * (y1 / y0) ** ((x - x0) / (x1 - x0))
 
+def prepare_for_fid(imgs):
+    imgs = imgs[:, 0:1]
+    imgs = imgs * 128 + 128
+    imgs = imgs.clamp(0, 255).to(torch.uint8)
+    imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
+    return imgs
+
 batch_size = 256
 latent_dim = 8
 
@@ -176,8 +183,8 @@ device = torch.device("cpu")
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=1e-4, betas=(0.0, 0.9))
-optimizer_D = optim.AdamW(D.parameters(), lr=1e-4, betas=(0.0, 0.9))
+optimizer_G = optim.AdamW(G.parameters(), lr=2e-4, betas=(0.0, 0.9))
+optimizer_D = optim.AdamW(D.parameters(), lr=2e-4, betas=(0.0, 0.9))
 loss_function = nn.BCELoss()
 
 transform = transforms.Compose([
@@ -209,10 +216,10 @@ while True:
     writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), epoch)
     writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), epoch)
 
-    real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
+    # real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, 0.1)
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, 1.0)
     D_loss.backward()
     optimizer_D.step()
 
@@ -234,10 +241,10 @@ while True:
     print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {G_loss.item()}")
 
     if epoch % 200 == 0:
-        fid_metric_acc.update((real_imgs[:, 0:1] * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = True)
+        fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
         fid_metric.reset()
         fid_metric.merge_state(fid_metric_acc)
-        fid_metric.update((fake_imgs[:, 0:1] * 128. + 128.).to(torch.uint8).broadcast_to((256, 3, 28, 28)), real = False)
+        fid_metric.update(prepare_for_fid(fake_imgs), real = False)
         fid_score = fid_metric.compute()
         print(f"FID: {fid_score}")
         writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
