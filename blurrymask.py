@@ -36,15 +36,15 @@ def make_random_irregular_mask(shape, max_angle=4, max_len=60, max_width=20, min
             start_x, start_y = end_x, end_y
     return mask[None, ...]
 
-def make_blurry_mask(shape, blur_size=15):
+def make_blurry_mask(shape, blur_size=3):
     """Creates a blurry mask by applying Gaussian blur to a random mask."""
     mask = make_random_irregular_mask(shape)
-    blurred_mask = cv2.GaussianBlur(mask[0], (blur_size, blur_size), 0)
+    blurred_mask = cv2.GaussianBlur(mask[0], (blur_size, blur_size), 1)
     return np.expand_dims(blurred_mask, axis=0)
 
 # Example usage
 if __name__ == "__main__":
-    shape = (256, 256)  # Example mask size
+    shape = (64, 64)  # Example mask size
     mask = make_random_irregular_mask(shape)
     blurry_mask = make_blurry_mask(shape)
 
