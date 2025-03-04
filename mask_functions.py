@@ -11,7 +11,9 @@ def get_random_chunk(data, chunk_size=32):
     z = np.random.randint(200, data.shape[3])
 
     chunk = data[w, x:x + chunk_size, y:y + chunk_size, z]
-    chunk /= np.max(chunk) + 1e-9
+    norm = np.max(np.abs(chunk))
+    if norm != 0:
+        chunk /= norm
 
     return chunk
 
