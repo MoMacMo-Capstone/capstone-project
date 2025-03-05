@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
-# from torchvision import datasets, transforms
+from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-import numpy as np
-import mask_functions
+# import numpy as np
+# import mask_functions
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
@@ -176,32 +176,45 @@ device = torch.device("cpu")
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=5e-5, betas=(0.0, 0.9))
-optimizer_D = optim.AdamW(D.parameters(), lr=2e-4, betas=(0.0, 0.9))
-loss_function = nn.BCELoss()
-
-# transform = transforms.Compose([
-    # transforms.ToTensor(),
-    # transforms.Normalize((0.5,), (0.5,))
-# ])
-# train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
-# train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
-fid_metric_acc = FrechetInceptionDistance(feature = 2048)
-fid_metric = FrechetInceptionDistance(feature = 2048)
 writer = SummaryWriter()
 
+hparams = {
+    "G lr": 2e-4,
+    "D lr": 2e-4,
+    "G beta2": 0.9,
+    "D beta2": 0.9,
+    "GP Gamma": 1.,
+}
+
+for name, value in hparams.items():
+    writer.add_scalar(f"hparams/{name}", value, 0)
+
+optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr"], betas=(0.0, hparams["G beta2"]))
+optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr"], betas=(0.0, hparams["D beta2"]))
+loss_function = nn.BCELoss()
+
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
+train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
+train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
+fid_metric_acc = FrechetInceptionDistance(feature = 2048)
+fid_metric = FrechetInceptionDistance(feature = 2048)
+
 mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
-mask[:,:,:,9:21] = 1
+# mask[:,:,:,9:21] = 1
+mask[:,:,9:21,9:21] = 1
 
 epoch = 0
 
 while True:
     epoch += 1
 
-    # real_imgs = next(iter(train_loader))[0]
+    real_imgs = next(iter(train_loader))[0]
 
-    real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
-    real_imgs = torch.tensor(real_imgs)
+    # real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
+    # real_imgs = torch.tensor(real_imgs)
 
     real_imgs = real_imgs.to(device).detach().requires_grad_(True)
     fake_imgs = G(real_imgs, mask)
@@ -217,7 +230,7 @@ while True:
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, 0.05)
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, hparams["GP Gamma"])
     D_loss.backward()
     optimizer_D.step()
 
