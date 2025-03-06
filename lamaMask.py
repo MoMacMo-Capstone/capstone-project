@@ -8,11 +8,10 @@ class DrawMethod(Enum):
     CIRCLE = 'circle'
     SQUARE = 'square'
 
+
+#customizable mask to cover approx 1/3-1/2(sometimes a bit lower) 
 def make_seismic_mask(shape, max_len=60, max_width=30, min_times=5, max_times=8,
                        draw_method=DrawMethod.LINE):
-    """Creates an irregular mask for seismic data infilling.
-    Masks approximately 1/3 to 1/2 of the image with wide lines.
-    """
     height, width = shape
     mask = np.zeros((height, width), np.float32)  # Changed to float32 for OpenCV compatibility
     times = np.random.randint(min_times, max_times + 1)
@@ -38,23 +37,30 @@ def make_seismic_mask(shape, max_len=60, max_width=30, min_times=5, max_times=8,
 
             start_x, start_y = end_x, end_y
     
-    # Convert to boolean mask after drawing
+    
     return (mask > 0).astype(bool)
 
-# Example usage
+#creates blurry mask
+def make_blurry_mask(shape, blur_size=3, **kwargs):
+    mask = make_seismic_mask(shape, **kwargs)
+    mask_float = mask.astype(np.float32)#convert to float to blur
+    blurred_mask = cv2.GaussianBlur(mask_float, (blur_size, blur_size), 1)
+    return blurred_mask
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     
-    # Example mask size 
+    # Example size for mask
     shape = (201, 201)
     
-    # Create a mask
+    
     mask = make_seismic_mask(shape)
     
     # Calculate coverage
     coverage = np.mean(mask)
     
-    # Plot mask
+
     plt.figure(figsize=(6, 6))
     plt.imshow(mask, cmap='gray')
     plt.title(f'Seismic Mask (Coverage: {coverage*100:.1f}%)')
