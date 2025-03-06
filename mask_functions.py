@@ -123,10 +123,10 @@ def get_chunk(chunk_size=32):
 
 def test_seismic_mask():
     chunk = get_chunk(chunk_size=64)  # 64x64
-    blurry_mask = make_blurry_mask(chunk.shape)  # Get soft blurry mask
+    mask = make_random_irregular_mask(chunk.shape)  # Get soft blurry mask
 
     # Apply the blurry mask as an opacity modifier rather than a binary mask
-    masked_chunk = chunk * (1 - blurry_mask[0])  # Scale seismic values by (1 - mask)
+    masked_chunk = chunk * (1 - mask[0])  # Scale seismic values by (1 - mask)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
@@ -134,7 +134,7 @@ def test_seismic_mask():
     axes[0].set_title("Original Seismic Data")
     axes[0].axis("off")
 
-    axes[1].imshow(blurry_mask[0], cmap="gray")  # Show the blurry mask
+    axes[1].imshow(mask[0], cmap="gray")  # Show the blurry mask
     axes[1].set_title("Generated Blurry Mask")
     axes[1].axis("off")
 
