@@ -10,19 +10,28 @@ class DrawMethod(Enum):
 
 
 #customizable mask to cover approx 1/3-1/2(sometimes a bit lower) 
-def make_seismic_mask(shape, max_len=60, max_width=30, min_times=5, max_times=8,
+def make_seismic_mask(shape, max_len=None, max_width=None, min_times=5, max_times=8,
                        draw_method=DrawMethod.LINE):
     height, width = shape
     mask = np.zeros((height, width), np.float32)  # Changed to float32 for OpenCV compatibility
     times = np.random.randint(min_times, max_times + 1)
-    
+
+    if max_len == None:
+        max_len = min(width, height) // 3
+
+    if max_width == None:
+        max_width = min(width, height) // 4
+
+    min_len = min(width, height) // 10
+    min_width = min(width, height) // 10
+
     for i in range(times):
         start_x, start_y = np.random.randint(width), np.random.randint(height)
         for j in range(1 + np.random.randint(3)):
             angle = 0.01 + np.random.randint(4)
             angle = 2 * np.pi - angle if i % 2 == 0 else angle
-            length = 20 + np.random.randint(max_len)
-            brush_w = 15 + np.random.randint(max_width - 15)
+            length = min_len + np.random.randint(max_len)
+            brush_w = min_width + np.random.randint(max_width - min_width)
             end_x = np.clip(int(start_x + length * np.sin(angle)), 0, width-1)
             end_y = np.clip(int(start_y + length * np.cos(angle)), 0, height-1)
 
@@ -53,6 +62,7 @@ if __name__ == "__main__":
     
     # Example size for mask
     shape = (201, 201)
+    # shape = (64, 64)
     
     
     mask = make_seismic_mask(shape)
