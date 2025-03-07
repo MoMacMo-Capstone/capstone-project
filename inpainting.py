@@ -47,27 +47,28 @@ class GBlock(nn.Module):
         self.output = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
         self.resolution = resolution
 
-        self.inner = None
-        self.noise_injector = None
-        self.channel_up = None
-        self.channel_down = None
-
         if resolution[0] // 2 >= 1 and resolution[1] // 2 >= 1:
             self.inner = GBlock(channels * 2, (resolution[0] // 2, resolution[1] // 2))
             self.noise_injector = nn.Conv2d(channels * 4, channels * 2, 1, bias=False)
             self.channel_up = nn.Conv2d(channels, channels * 2, 3, bias=False, padding=1)
             self.channel_down = nn.Conv2d(channels * 2, channels, 3, bias=False, padding=1)
+        else:
+            self.inner = None
+            self.noise_injector = None
+            self.channel_up = None
+            self.channel_down = None
 
     def forward(self, x):
         x = self.input(x)
 
-        if self.inner and self.channel_up and self.channel_down and self.noise_injector:
+        if self.inner and self.channel_up and self.channel_down:
             x_orig = x
 
             x = self.channel_up(x)
             x = nn.functional.interpolate(x, scale_factor=0.5, mode="bilinear")
 
-            x = self.noise_injector(torch.cat([x, torch.randn_like(x)], 1))
+            if self.noise_injector:
+                x = self.noise_injector(torch.cat([x, torch.randn_like(x)], 1))
             x = self.inner(x)
 
             x = nn.functional.interpolate(x, size=self.resolution, mode="bilinear")
@@ -96,7 +97,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.model = nn.Sequential(
-            nn.Conv2d(2, latent_dim, 1),
+            nn.Conv2d(3, latent_dim, 1),
             DBlock(latent_dim, latent_dim * 2),
             DBlock(latent_dim * 2, latent_dim * 4),
             DBlock(latent_dim * 4, latent_dim * 8),
@@ -118,22 +119,28 @@ def masked_zero_centered_gradient_penalty(samples, critics, mask):
     grad *= mask
     return grad.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, fake_samples, real_logits, mask):
+def generator_loss(discriminator, fake_samples, real_samples, mask):
     fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
 
-    relativistic_logits = fake_logits - real_logits.detach()
+    relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
 
     writer.add_scalar("Loss/Generator Loss", adversarial_loss.item(), epoch)
 
     return adversarial_loss
 
-def discriminator_loss(discriminator, fake_samples, real_samples, real_logits, mask, gamma):
+def discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
     fake_samples = fake_samples.detach().requires_grad_(True)
-    fake_logits = discriminator(fake_samples, mask)
+    real_samples = real_samples.detach().requires_grad_(True)
 
-    r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
-    r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+    fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
+
+    # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
+    # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+    r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
 
     relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -183,7 +190,7 @@ hparams = {
     "D lr": 2e-4,
     "G beta2": 0.9,
     "D beta2": 0.9,
-    "GP Gamma": 1.,
+    "GP Gamma": 1.0,
 }
 
 for name, value in hparams.items():
@@ -222,15 +229,15 @@ while True:
     writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), epoch)
     writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), epoch)
 
-    real_logits = D(real_imgs, mask)
+    real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
 
     optimizer_G.zero_grad()
-    G_loss = generator_loss(D, fake_imgs, real_logits, mask)
+    G_loss = generator_loss(D, fake_imgs, real_imgs, mask)
     G_loss.backward()
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, hparams["GP Gamma"])
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, hparams["GP Gamma"])
     D_loss.backward()
     optimizer_D.step()
 
