@@ -61,8 +61,8 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     
     # Example size for mask
-    shape = (201, 201)
-    # shape = (64, 64)
+    # shape = (201, 201)
+    shape = (64, 64)
     
     
     mask = make_seismic_mask(shape)

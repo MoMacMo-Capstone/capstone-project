@@ -10,105 +10,85 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 # import numpy as np
 # import mask_functions
 
+def fft(image):
+    image = torch.fft.rfft2(image)
+    return torch.cat([image.real, image.imag], dim=1)
+
+def ifft(image):
+    channels = image.shape[1] // 2
+    image = torch.complex(image[:,:channels], image[:,channels:])
+    return torch.fft.irfft2(image)
+
+class FFC(nn.Module):
+    def __init__(self, channels, alpha):
+        super(FFC, self).__init__()
+        self.channels_g = int(channels * alpha)
+        self.channels_l = channels - self.channels_g
+        self.conv_l_l = nn.Conv2d(self.channels_l, self.channels_l, 3, padding=1)
+        self.conv_l_g = nn.Conv2d(self.channels_l, self.channels_g, 3, padding=1)
+        self.conv_g_l = nn.Conv2d(self.channels_g, self.channels_l, 3, padding=1)
+        self.conv_g_g = nn.Conv2d(self.channels_g * 2, self.channels_g * 2, 1)
+
+    def forward(self, z):
+        input_l = z[:,:self.channels_l]
+        input_g = z[:,self.channels_l:]
+        z_l = nn.functional.leaky_relu(self.conv_l_l(input_l) + self.conv_g_l(input_g), 0.2)
+
+        z_g = fft(input_g)
+        z_g = nn.functional.leaky_relu(self.conv_g_g(z_g), 0.2)
+        z_g = ifft(z_g)
+
+        z_g = nn.functional.leaky_relu(z_g + self.conv_l_g(input_l))
+
+        return torch.cat([z_l, z_g], dim=1)
+
 class ResidualBlock(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, alpha):
         super(ResidualBlock, self).__init__()
         self.block = nn.Sequential(
-            nn.Conv2d(channels, channels * 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(channels * 2, channels * 2, 3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(channels * 2, channels, 1, bias=False),
+            FFC(channels, alpha),
+            FFC(channels, alpha),
         )
 
     def forward(self, z):
         return z + self.block(z)
 
-class DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DBlock, self).__init__()
-        self.block = nn.Sequential(
-            ResidualBlock(in_channels),
-            ResidualBlock(in_channels),
-            ResidualBlock(in_channels),
-            ResidualBlock(in_channels),
-        )
-
-        if in_channels != out_channels:
-            self.block.append(nn.Conv2d(in_channels, out_channels, 3, bias=False, padding = 1))
-
-    def forward(self, z):
-        return nn.functional.interpolate(self.block(z), scale_factor=0.5, mode="bilinear")
-
-class GBlock(nn.Module):
-    def __init__(self, channels, resolution):
-        super(GBlock, self).__init__()
-        self.input = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
-        self.output = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
-        self.resolution = resolution
-
-        if resolution[0] // 2 >= 1 and resolution[1] // 2 >= 1:
-            self.inner = GBlock(channels * 2, (resolution[0] // 2, resolution[1] // 2))
-            self.noise_injector = nn.Conv2d(channels * 4, channels * 2, 1, bias=False)
-            self.channel_up = nn.Conv2d(channels, channels * 2, 3, bias=False, padding=1)
-            self.channel_down = nn.Conv2d(channels * 2, channels, 3, bias=False, padding=1)
-        else:
-            self.inner = None
-            self.noise_injector = None
-            self.channel_up = None
-            self.channel_down = None
-
-    def forward(self, x):
-        x = self.input(x)
-
-        if self.inner and self.channel_up and self.channel_down:
-            x_orig = x
-
-            x = self.channel_up(x)
-            x = nn.functional.interpolate(x, scale_factor=0.5, mode="bilinear")
-
-            if self.noise_injector:
-                x = self.noise_injector(torch.cat([x, torch.randn_like(x)], 1))
-            x = self.inner(x)
-
-            x = nn.functional.interpolate(x, size=self.resolution, mode="bilinear")
-            x = self.channel_down(x)
-
-            x += x_orig
-
-        return self.output(x)
-
 class Generator(nn.Module):
     def __init__(self, latent_dim):
         super(Generator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(2, latent_dim, 1, bias=False),
-            GBlock(latent_dim, (28, 28)),
+            nn.Conv2d(4, latent_dim, 1, bias=False),
+            ResidualBlock(latent_dim, 0.25),
+            ResidualBlock(latent_dim, 0.25),
+            ResidualBlock(latent_dim, 0.25),
+            ResidualBlock(latent_dim, 0.25),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, original, mask):
         original = original.masked_fill(mask, 0)
-        inpainting = self.model(torch.cat([original, mask], dim = 1))
-        return torch.where(mask, inpainting, original)
+        noise = torch.randn_like(original)
+        fft_noise = ifft(torch.randn_like(fft(original)))
+        inpainted = self.model(torch.cat([original, mask, noise, fft_noise], dim = 1))
+        return torch.where(mask, inpainted, original)
 
 class Discriminator(nn.Module):
     def __init__(self, latent_dim):
         super(Discriminator, self).__init__()
 
-        self.model = nn.Sequential(
+        self.convs = nn.Sequential(
             nn.Conv2d(3, latent_dim, 1),
-            DBlock(latent_dim, latent_dim * 2),
-            DBlock(latent_dim * 2, latent_dim * 4),
-            DBlock(latent_dim * 4, latent_dim * 8),
-            DBlock(latent_dim * 8, latent_dim * 16),
-            nn.Flatten(),
-            nn.Linear(latent_dim * 16, 1),
+            ResidualBlock(latent_dim, 0.25),
+            ResidualBlock(latent_dim, 0.25),
+            ResidualBlock(latent_dim, 0.25),
+            ResidualBlock(latent_dim, 0.25),
         )
+        self.linear = nn.Linear(latent_dim, 1)
 
     def forward(self, inpainted, mask):
         z = torch.cat([inpainted, mask], dim = 1);
-        return self.model(z)
+        z = self.convs(z).mean([2, 3])
+        return self.linear(z)
 
 def zero_centered_gradient_penalty(Samples, Critics):
     Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
@@ -175,7 +155,7 @@ def prepare_for_fid(imgs):
     return imgs
 
 batch_size = 256
-latent_dim = 8
+latent_dim = 16
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
@@ -186,8 +166,8 @@ D = Discriminator(latent_dim).to(device)
 writer = SummaryWriter()
 
 hparams = {
-    "G lr": 2e-4,
-    "D lr": 2e-4,
+    "G lr": 5e-4,
+    "D lr": 1e-3,
     "G beta2": 0.9,
     "D beta2": 0.9,
     "GP Gamma": 1.0,
