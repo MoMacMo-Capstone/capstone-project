@@ -45,9 +45,12 @@ def make_seismic_mask(shape, max_len=None, max_width=None, min_times=5, max_time
                      max(0, start_x - radius):min(width, start_x + radius)] = 1
 
             start_x, start_y = end_x, end_y
-    
-    
+
     return (mask > 0).astype(bool)
+
+def make_seismic_masks(num_masks, *args, **kvargs):
+    masks = np.stack([make_seismic_mask(*args, **kvargs) for _ in range(num_masks)])
+    return np.expand_dims(masks, 1)
 
 #creates blurry mask
 def make_blurry_mask(shape, blur_size=3, **kwargs):

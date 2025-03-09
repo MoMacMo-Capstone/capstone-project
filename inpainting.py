@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+# from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
-from torchvision import datasets, transforms
-from torchmetrics.image.fid import FrechetInceptionDistance
+# from torchvision import datasets, transforms
+# from torchmetrics.image.fid import FrechetInceptionDistance
 
-# import numpy as np
-# import mask_functions
+import lama_mask
+import read_seismic_data
 
 def fft(image):
     image = torch.fft.rfft2(image)
@@ -19,49 +19,63 @@ def ifft(image):
     image = torch.complex(image[:,:channels], image[:,channels:])
     return torch.fft.irfft2(image)
 
-class FFC(nn.Module):
-    def __init__(self, channels, alpha):
-        super(FFC, self).__init__()
-        self.channels_g = int(channels * alpha)
-        self.channels_l = channels - self.channels_g
-        self.conv_l_l = nn.Conv2d(self.channels_l, self.channels_l, 3, padding=1)
-        self.conv_l_g = nn.Conv2d(self.channels_l, self.channels_g, 3, padding=1)
-        self.conv_g_l = nn.Conv2d(self.channels_g, self.channels_l, 3, padding=1)
-        self.conv_g_g = nn.Conv2d(self.channels_g * 2, self.channels_g * 2, 1)
-
-    def forward(self, z):
-        input_l = z[:,:self.channels_l]
-        input_g = z[:,self.channels_l:]
-        z_l = nn.functional.leaky_relu(self.conv_l_l(input_l) + self.conv_g_l(input_g), 0.2)
-
-        z_g = fft(input_g)
-        z_g = nn.functional.leaky_relu(self.conv_g_g(z_g), 0.2)
-        z_g = ifft(z_g)
-
-        z_g = nn.functional.leaky_relu(z_g + self.conv_l_g(input_l))
-
-        return torch.cat([z_l, z_g], dim=1)
+def leaky_relu(z):
+    return nn.functional.leaky_relu(z, 0.2)
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels, alpha):
+    def __init__(self, channels):
         super(ResidualBlock, self).__init__()
         self.block = nn.Sequential(
-            FFC(channels, alpha),
-            FFC(channels, alpha),
+            nn.Conv2d(channels, channels * 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 2, channels * 2, 3, groups=channels // 8, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 2, channels, 1, bias=False),
         )
 
     def forward(self, z):
         return z + self.block(z)
 
+class FFResidualBlock(nn.Module):
+    def __init__(self, channels, pe_channels, resolution):
+        super(FFResidualBlock, self).__init__()
+        self.pe = torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1))
+        self.inner = nn.Sequential(
+            nn.Conv2d(channels * 2 + pe_channels, channels * 4, 1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 4, channels * 4, 3, groups=channels // 4, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 4, channels * 2, 1, bias=False),
+        )
+
+    def forward(self, z):
+        orig = z
+
+        z = fft(z)
+        pe = self.pe.expand(z.shape[0], self.pe.shape[0], self.pe.shape[1], self.pe.shape[2])
+        z = self.inner(torch.cat([z, pe], dim=1))
+        z = ifft(z)
+
+        z = z - z.mean([2, 3], keepdim=True) + orig.mean([2, 3], keepdim=True)
+        orig_max = orig.amax(2, keepdim=True).amax(3, keepdim=True)
+        orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
+        z = z.clamp(orig_min, orig_max)
+
+        return z + orig
+
 class Generator(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, resolution):
         super(Generator, self).__init__()
         self.model = nn.Sequential(
             nn.Conv2d(4, latent_dim, 1, bias=False),
-            ResidualBlock(latent_dim, 0.25),
-            ResidualBlock(latent_dim, 0.25),
-            ResidualBlock(latent_dim, 0.25),
-            ResidualBlock(latent_dim, 0.25),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
 
@@ -73,15 +87,19 @@ class Generator(nn.Module):
         return torch.where(mask, inpainted, original)
 
 class Discriminator(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, resolution):
         super(Discriminator, self).__init__()
 
         self.convs = nn.Sequential(
             nn.Conv2d(3, latent_dim, 1),
-            ResidualBlock(latent_dim, 0.25),
-            ResidualBlock(latent_dim, 0.25),
-            ResidualBlock(latent_dim, 0.25),
-            ResidualBlock(latent_dim, 0.25),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 8, resolution),
+            ResidualBlock(latent_dim),
         )
         self.linear = nn.Linear(latent_dim, 1)
 
@@ -154,14 +172,15 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
+resolution = (64, 64)
 batch_size = 256
 latent_dim = 16
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator(latent_dim).to(device)
-D = Discriminator(latent_dim).to(device)
+G = Generator(latent_dim, (28, 28)).to(device)
+D = Discriminator(latent_dim, (28, 28)).to(device)
 
 writer = SummaryWriter()
 
@@ -180,28 +199,31 @@ optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr"], betas=(0.0, hparam
 optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr"], betas=(0.0, hparams["D beta2"]))
 loss_function = nn.BCELoss()
 
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
-train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
-train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
-fid_metric_acc = FrechetInceptionDistance(feature = 2048)
-fid_metric = FrechetInceptionDistance(feature = 2048)
+# transform = transforms.Compose([
+    # transforms.ToTensor(),
+    # transforms.Normalize((0.5,), (0.5,))
+# ])
+# train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
+# train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
+# fid_metric_acc = FrechetInceptionDistance(feature = 2048)
+# fid_metric = FrechetInceptionDistance(feature = 2048)
 
-mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
+# mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
 # mask[:,:,:,9:21] = 1
-mask[:,:,9:21,9:21] = 1
+# mask[:,:,9:21,9:21] = 1
 
 epoch = 0
 
 while True:
     epoch += 1
 
-    real_imgs = next(iter(train_loader))[0]
+    # real_imgs = next(iter(train_loader))[0]
 
-    # real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
-    # real_imgs = torch.tensor(real_imgs)
+    real_imgs = read_seismic_data.get_chunks(batch_size, resolution[0])
+    real_imgs = torch.tensor(real_imgs)
+
+    mask = lama_mask.make_seismic_masks(batch_size, resolution)
+    mask = torch.tensor(mask)
 
     real_imgs = real_imgs.to(device).detach().requires_grad_(True)
     fake_imgs = G(real_imgs, mask)
@@ -226,23 +248,23 @@ while True:
         real_imgs[:32, 0:1].masked_fill(mask[:32, 0:1], 0),
         fake_imgs[:32, 0:1]
     ], 0)
-    grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+    # grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, epoch)
 
     print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {G_loss.item()}")
 
-    if epoch % 200 == 0:
-        fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
-        fid_metric.reset()
-        fid_metric.merge_state(fid_metric_acc)
-        fid_metric.update(prepare_for_fid(fake_imgs), real = False)
-        fid_score = fid_metric.compute()
-        print(f"FID: {fid_score}")
-        writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
-        torch.save({
-            "generator": G.state_dict(),
-            "discriminator": D.state_dict(),
-            "epoch": epoch,
-        }, f"checkpoint_{epoch}.ckpt")
+    # if epoch % 200 == 0:
+        # fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
+        # fid_metric.reset()
+        # fid_metric.merge_state(fid_metric_acc)
+        # fid_metric.update(prepare_for_fid(fake_imgs), real = False)
+        # fid_score = fid_metric.compute()
+        # print(f"FID: {fid_score}")
+        # writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
+        # torch.save({
+            # "generator": G.state_dict(),
+            # "discriminator": D.state_dict(),
+            # "epoch": epoch,
+        # }, f"checkpoint_{epoch}.ckpt")
