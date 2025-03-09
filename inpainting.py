@@ -39,7 +39,6 @@ class ResidualBlock(nn.Module):
 class FFResidualBlock(nn.Module):
     def __init__(self, channels, pe_channels, resolution):
         super(FFResidualBlock, self).__init__()
-        self.pe = torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1))
         self.inner = nn.Sequential(
             nn.Conv2d(channels * 2 + pe_channels, channels * 4, 1),
             nn.LeakyReLU(0.2),
@@ -47,6 +46,7 @@ class FFResidualBlock(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Conv2d(channels * 4, channels * 2, 1, bias=False),
         )
+        self.pe = nn.Parameter(torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1)))
 
     def forward(self, z):
         orig = z
@@ -176,8 +176,8 @@ resolution = (64, 64)
 batch_size = 256
 latent_dim = 32
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 
 G = Generator(latent_dim, resolution).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
@@ -218,10 +218,10 @@ while True:
     epoch += 1
 
     real_imgs = read_seismic_data.get_chunks(batch_size, resolution[0])
-    real_imgs = torch.tensor(real_imgs)
+    real_imgs = torch.tensor(real_imgs, device=device)
 
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
-    mask = torch.tensor(mask)
+    mask = torch.tensor(mask, device=device)
 
     real_imgs = real_imgs.to(device).detach().requires_grad_(True)
     fake_imgs = G(real_imgs, mask)
