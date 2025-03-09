@@ -174,13 +174,13 @@ def prepare_for_fid(imgs):
 
 resolution = (64, 64)
 batch_size = 256
-latent_dim = 16
+latent_dim = 32
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator(latent_dim, (28, 28)).to(device)
-D = Discriminator(latent_dim, (28, 28)).to(device)
+G = Generator(latent_dim, resolution).to(device)
+D = Discriminator(latent_dim, resolution).to(device)
 
 writer = SummaryWriter()
 
@@ -216,8 +216,6 @@ epoch = 0
 
 while True:
     epoch += 1
-
-    # real_imgs = next(iter(train_loader))[0]
 
     real_imgs = read_seismic_data.get_chunks(batch_size, resolution[0])
     real_imgs = torch.tensor(real_imgs)

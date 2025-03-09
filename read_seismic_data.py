@@ -6,7 +6,7 @@ def get_random_chunk(data, chunk_size=32):
     y = np.random.randint(0, data.shape[2] - chunk_size)
     z = np.random.randint(200, data.shape[3])
 
-    chunk = data[w, x:x + chunk_size, y:y + chunk_size, z]
+    chunk = np.array(data[w, x:x + chunk_size, y:y + chunk_size, z])
     norm = np.max(np.abs(chunk))
     if norm != 0:
         chunk /= norm
@@ -35,4 +35,4 @@ def get_chunk(chunk_size=32):
     return random_rotate_and_mirror(get_random_chunk(data, chunk_size))
 
 def get_chunks(n_chunks, chunk_size=32):
-    return np.stack([np.expand_dims(get_chunk(chunk_size), 1) for _ in range(n_chunks)])
+    return np.stack([np.expand_dims(get_chunk(chunk_size), 0) for _ in range(n_chunks)])
