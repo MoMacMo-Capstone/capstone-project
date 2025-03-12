@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
 # from torchvision import datasets, transforms
-# from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.fid import FrechetInceptionDistance
 
 import lama_mask
 import read_seismic_data
@@ -36,24 +36,46 @@ class ResidualBlock(nn.Module):
     def forward(self, z):
         return z + self.block(z)
 
-class FFResidualBlock(nn.Module):
-    def __init__(self, channels, pe_channels, resolution):
-        super(FFResidualBlock, self).__init__()
-        self.inner = nn.Sequential(
+class FFResidualInner(nn.Module):
+    def __init__(self, channels, pe_channels, resolution, add_noise=False, dilation=1):
+        super(FFResidualInner, self).__init__()
+        self.block = nn.Sequential(
             nn.Conv2d(channels * 2 + pe_channels, channels * 4, 1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(channels * 4, channels * 4, 3, groups=channels // 4, padding=1),
+            nn.Conv2d(channels * 4, channels * 4, 3, groups=channels // 4, padding=dilation, dilation=dilation),
             nn.LeakyReLU(0.2),
             nn.Conv2d(channels * 4, channels * 2, 1, bias=False),
         )
-        self.pe = nn.Parameter(torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1)))
+        self.pe_mean = nn.Parameter(torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1)))
+        if add_noise:
+            self.pe_var = nn.Parameter(torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1)))
+        else:
+            self.pe_var = None
+
+    def forward(self, z):
+        orig = z
+
+        pe_shape = (z.shape[0], self.pe_mean.shape[0], self.pe_mean.shape[1], self.pe_mean.shape[2])
+        pe = self.pe_mean.expand(pe_shape)
+
+        if self.pe_var:
+            pe = pe + self.pe_var.expand(pe_shape) * torch.randn(pe_shape, device=z.device)
+        z = self.block(torch.cat([z, pe], dim=1))
+
+        return z + orig
+
+class FFResidualBlock(nn.Module):
+    def __init__(self, channels, pe_channels, resolution, add_noise=False):
+        super(FFResidualBlock, self).__init__()
+        self.inner1 = FFResidualInner(channels, pe_channels, resolution, add_noise)
+        self.inner2 = FFResidualInner(channels, pe_channels, resolution, add_noise, dilation=resolution[0] // 4)
 
     def forward(self, z):
         orig = z
 
         z = fft(z)
-        pe = self.pe.expand(z.shape[0], self.pe.shape[0], self.pe.shape[1], self.pe.shape[2])
-        z = self.inner(torch.cat([z, pe], dim=1))
+        z = self.inner1(z)
+        z = self.inner2(z)
         z = ifft(z)
 
         z = z - z.mean([2, 3], keepdim=True) + orig.mean([2, 3], keepdim=True)
@@ -61,29 +83,27 @@ class FFResidualBlock(nn.Module):
         orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
         z = z.clamp(orig_min, orig_max)
 
-        return z + orig
+        return z
 
 class Generator(nn.Module):
     def __init__(self, latent_dim, resolution):
         super(Generator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(4, latent_dim, 1, bias=False),
-            FFResidualBlock(latent_dim, 8, resolution),
+            nn.Conv2d(2, latent_dim, 1, bias=False),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
             ResidualBlock(latent_dim),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
             ResidualBlock(latent_dim),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
             ResidualBlock(latent_dim),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
             ResidualBlock(latent_dim),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, original, mask):
         original = original.masked_fill(mask, 0)
-        noise = torch.randn_like(original)
-        fft_noise = ifft(torch.randn_like(fft(original)))
-        inpainted = self.model(torch.cat([original, mask, noise, fft_noise], dim = 1))
+        inpainted = self.model(torch.cat([original, mask], dim = 1))
         return torch.where(mask, inpainted, original)
 
 class Discriminator(nn.Module):
@@ -92,13 +112,13 @@ class Discriminator(nn.Module):
 
         self.convs = nn.Sequential(
             nn.Conv2d(3, latent_dim, 1),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution),
             ResidualBlock(latent_dim),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution),
             ResidualBlock(latent_dim),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution),
             ResidualBlock(latent_dim),
-            FFResidualBlock(latent_dim, 8, resolution),
+            FFResidualBlock(latent_dim, 4, resolution),
             ResidualBlock(latent_dim),
         )
         self.linear = nn.Linear(latent_dim, 1)
@@ -172,15 +192,18 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
-resolution = (64, 64)
+resolution = (32, 32)
 batch_size = 256
-latent_dim = 32
+latent_dim = 8
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 G = Generator(latent_dim, resolution).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
+
+print("G params:", sum(p.numel() for p in G.parameters()))
+print("D params:", sum(p.numel() for p in D.parameters()))
 
 writer = SummaryWriter()
 
@@ -205,8 +228,8 @@ loss_function = nn.BCELoss()
 # ])
 # train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
 # train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
-# fid_metric_acc = FrechetInceptionDistance(feature = 2048)
-# fid_metric = FrechetInceptionDistance(feature = 2048)
+fid_metric_acc = FrechetInceptionDistance(feature = 2048)
+fid_metric = FrechetInceptionDistance(feature = 2048)
 
 # mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
 # mask[:,:,:,9:21] = 1
@@ -246,23 +269,23 @@ while True:
         real_imgs[:32, 0:1].masked_fill(mask[:32, 0:1], 0),
         fake_imgs[:32, 0:1]
     ], 0)
-    # grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+    grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, epoch)
 
     print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {G_loss.item()}")
 
-    # if epoch % 200 == 0:
-        # fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
-        # fid_metric.reset()
-        # fid_metric.merge_state(fid_metric_acc)
-        # fid_metric.update(prepare_for_fid(fake_imgs), real = False)
-        # fid_score = fid_metric.compute()
-        # print(f"FID: {fid_score}")
-        # writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
-        # torch.save({
-            # "generator": G.state_dict(),
-            # "discriminator": D.state_dict(),
-            # "epoch": epoch,
-        # }, f"checkpoint_{epoch}.ckpt")
+    if epoch % 200 == 0:
+        fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
+        fid_metric.reset()
+        fid_metric.merge_state(fid_metric_acc)
+        fid_metric.update(prepare_for_fid(fake_imgs), real = False)
+        fid_score = fid_metric.compute()
+        print(f"FID: {fid_score}")
+        writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
+        torch.save({
+            "generator": G.state_dict(),
+            "discriminator": D.state_dict(),
+            "epoch": epoch,
+        }, f"checkpoint_{epoch}.ckpt")

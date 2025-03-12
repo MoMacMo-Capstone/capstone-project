@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import random
 from enum import Enum
 
 class DrawMethod(Enum):
