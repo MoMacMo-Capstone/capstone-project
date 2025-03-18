@@ -7,107 +7,126 @@ import torchvision
 # from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-import numpy as np
-import mask_functions
+import lama_mask
+import read_seismic_data
+
+def fft(image):
+    image = torch.fft.rfft2(image)
+    return torch.cat([image.real, image.imag], dim=1)
+
+def ifft(image):
+    channels = image.shape[1] // 2
+    image = torch.complex(image[:,:channels], image[:,channels:])
+    return torch.fft.irfft2(image)
+
+def leaky_relu(z):
+    return nn.functional.leaky_relu(z, 0.2)
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
         self.block = nn.Sequential(
             nn.Conv2d(channels, channels * 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(channels * 2, channels * 2, 3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 2, channels * 2, 3, groups=channels // 8, padding=1),
+            nn.LeakyReLU(0.2),
             nn.Conv2d(channels * 2, channels, 1, bias=False),
         )
 
     def forward(self, z):
         return z + self.block(z)
 
-class DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DBlock, self).__init__()
+class FFResidualInner(nn.Module):
+    def __init__(self, channels, pe_channels, resolution, add_noise=False, dilation=1):
+        super(FFResidualInner, self).__init__()
         self.block = nn.Sequential(
-            ResidualBlock(in_channels),
-            ResidualBlock(in_channels),
-            ResidualBlock(in_channels),
-            ResidualBlock(in_channels),
+            nn.Conv2d(channels * 2 + pe_channels, channels * 4, 1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 4, channels * 4, 3, groups=channels // 4, padding=dilation, dilation=dilation),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 4, channels * 2, 1, bias=False),
         )
-
-        if in_channels != out_channels:
-            self.block.append(nn.Conv2d(in_channels, out_channels, 3, bias=False, padding = 1))
+        self.pe_mean = nn.Parameter(torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1)))
+        if add_noise:
+            self.pe_var = nn.Parameter(torch.randn((pe_channels, resolution[0], resolution[1] // 2 + 1)))
+        else:
+            self.pe_var = None
 
     def forward(self, z):
-        return nn.functional.interpolate(self.block(z), scale_factor=0.5, mode="bilinear")
+        orig = z
 
-class GBlock(nn.Module):
-    def __init__(self, channels, resolution):
-        super(GBlock, self).__init__()
-        self.input = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
-        self.output = nn.Sequential(ResidualBlock(channels), ResidualBlock(channels))
-        self.resolution = resolution
+        pe_shape = (z.shape[0], self.pe_mean.shape[0], self.pe_mean.shape[1], self.pe_mean.shape[2])
+        pe = self.pe_mean.expand(pe_shape)
 
-        self.inner = None
-        self.noise_injector = None
-        self.channel_up = None
-        self.channel_down = None
+        if self.pe_var:
+            pe = pe + self.pe_var.expand(pe_shape) * torch.randn(pe_shape, device=z.device)
+        z = self.block(torch.cat([z, pe], dim=1))
 
-        if resolution[0] // 2 >= 1 and resolution[1] // 2 >= 1:
-            self.inner = GBlock(channels * 2, (resolution[0] // 2, resolution[1] // 2))
-            self.noise_injector = nn.Conv2d(channels * 4, channels * 2, 1, bias=False)
-            self.channel_up = nn.Conv2d(channels, channels * 2, 3, bias=False, padding=1)
-            self.channel_down = nn.Conv2d(channels * 2, channels, 3, bias=False, padding=1)
+        return z + orig
 
-    def forward(self, x):
-        x = self.input(x)
+class FFResidualBlock(nn.Module):
+    def __init__(self, channels, pe_channels, resolution, add_noise=False):
+        super(FFResidualBlock, self).__init__()
+        self.inner1 = FFResidualInner(channels, pe_channels, resolution, add_noise)
+        self.inner2 = FFResidualInner(channels, pe_channels, resolution, add_noise, dilation=resolution[0] // 4)
 
-        if self.inner and self.channel_up and self.channel_down and self.noise_injector:
-            x_orig = x
+    def forward(self, z):
+        orig = z
 
-            x = self.channel_up(x)
-            x = nn.functional.interpolate(x, scale_factor=0.5, mode="bilinear")
+        z = fft(z)
+        z = self.inner1(z)
+        z = self.inner2(z)
+        z = ifft(z)
 
-            x = self.noise_injector(torch.cat([x, torch.randn_like(x)], 1))
-            x = self.inner(x)
+        z = z - z.mean([2, 3], keepdim=True) + orig.mean([2, 3], keepdim=True)
+        orig_max = orig.amax(2, keepdim=True).amax(3, keepdim=True)
+        orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
+        z = z.clamp(orig_min, orig_max)
 
-            x = nn.functional.interpolate(x, size=self.resolution, mode="bilinear")
-            x = self.channel_down(x)
-
-            x += x_orig
-
-        return self.output(x)
+        return z
 
 class Generator(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, resolution):
         super(Generator, self).__init__()
         self.model = nn.Sequential(
             nn.Conv2d(2, latent_dim, 1, bias=False),
-            GBlock(latent_dim, (28, 28)),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 4, resolution, add_noise=True),
+            ResidualBlock(latent_dim),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, original, mask):
         original = original.masked_fill(mask, 0)
-        inpainting = self.model(torch.cat([original, mask], dim = 1))
-        return torch.where(mask, inpainting, original)
+        inpainted = self.model(torch.cat([original, mask], dim = 1))
+        return torch.where(mask, inpainted, original)
 
 class Discriminator(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, resolution):
         super(Discriminator, self).__init__()
 
-        self.model = nn.Sequential(
-            nn.Conv2d(2, latent_dim, 1),
-            DBlock(latent_dim, latent_dim * 2),
-            DBlock(latent_dim * 2, latent_dim * 4),
-            DBlock(latent_dim * 4, latent_dim * 8),
-            DBlock(latent_dim * 8, latent_dim * 16),
-            nn.Flatten(),
-            nn.Linear(latent_dim * 16, 1),
+        self.convs = nn.Sequential(
+            nn.Conv2d(3, latent_dim, 1),
+            FFResidualBlock(latent_dim, 4, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 4, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 4, resolution),
+            ResidualBlock(latent_dim),
+            FFResidualBlock(latent_dim, 4, resolution),
+            ResidualBlock(latent_dim),
         )
+        self.linear = nn.Linear(latent_dim, 1)
 
     def forward(self, inpainted, mask):
         z = torch.cat([inpainted, mask], dim = 1);
-        return self.model(z)
+        z = self.convs(z).mean([2, 3])
+        return self.linear(z)
 
 def zero_centered_gradient_penalty(Samples, Critics):
     Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
@@ -118,22 +137,28 @@ def masked_zero_centered_gradient_penalty(samples, critics, mask):
     grad *= mask
     return grad.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, fake_samples, real_logits, mask):
+def generator_loss(discriminator, fake_samples, real_samples, mask):
     fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
 
-    relativistic_logits = fake_logits - real_logits.detach()
+    relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
 
     writer.add_scalar("Loss/Generator Loss", adversarial_loss.item(), epoch)
 
     return adversarial_loss
 
-def discriminator_loss(discriminator, fake_samples, real_samples, real_logits, mask, gamma):
+def discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
     fake_samples = fake_samples.detach().requires_grad_(True)
-    fake_logits = discriminator(fake_samples, mask)
+    real_samples = real_samples.detach().requires_grad_(True)
 
-    r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
-    r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+    fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
+
+    # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
+    # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+    r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
 
     relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -167,17 +192,34 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
+resolution = (32, 32)
 batch_size = 256
 latent_dim = 8
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator(latent_dim).to(device)
-D = Discriminator(latent_dim).to(device)
+G = Generator(latent_dim, resolution).to(device)
+D = Discriminator(latent_dim, resolution).to(device)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=5e-5, betas=(0.0, 0.9))
-optimizer_D = optim.AdamW(D.parameters(), lr=2e-4, betas=(0.0, 0.9))
+print("G params:", sum(p.numel() for p in G.parameters()))
+print("D params:", sum(p.numel() for p in D.parameters()))
+
+writer = SummaryWriter()
+
+hparams = {
+    "G lr": 5e-4,
+    "D lr": 1e-3,
+    "G beta2": 0.9,
+    "D beta2": 0.9,
+    "GP Gamma": 1.0,
+}
+
+for name, value in hparams.items():
+    writer.add_scalar(f"hparams/{name}", value, 0)
+
+optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr"], betas=(0.0, hparams["G beta2"]))
+optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr"], betas=(0.0, hparams["D beta2"]))
 loss_function = nn.BCELoss()
 
 # transform = transforms.Compose([
@@ -188,20 +230,21 @@ loss_function = nn.BCELoss()
 # train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 fid_metric_acc = FrechetInceptionDistance(feature = 2048)
 fid_metric = FrechetInceptionDistance(feature = 2048)
-writer = SummaryWriter()
 
-mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
-mask[:,:,:,9:21] = 1
+# mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
+# mask[:,:,:,9:21] = 1
+# mask[:,:,9:21,9:21] = 1
 
 epoch = 0
 
 while True:
     epoch += 1
 
-    # real_imgs = next(iter(train_loader))[0]
+    real_imgs = read_seismic_data.get_chunks(batch_size, resolution[0])
+    real_imgs = torch.tensor(real_imgs, device=device)
 
-    real_imgs = np.concatenate([np.expand_dims(mask_functions.get_chunk(28), (0, 1)) for _ in range(256)])
-    real_imgs = torch.tensor(real_imgs)
+    mask = lama_mask.make_seismic_masks(batch_size, resolution)
+    mask = torch.tensor(mask, device=device)
 
     real_imgs = real_imgs.to(device).detach().requires_grad_(True)
     fake_imgs = G(real_imgs, mask)
@@ -209,15 +252,15 @@ while True:
     writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), epoch)
     writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), epoch)
 
-    real_logits = D(real_imgs, mask)
+    real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
 
     optimizer_G.zero_grad()
-    G_loss = generator_loss(D, fake_imgs, real_logits, mask)
+    G_loss = generator_loss(D, fake_imgs, real_imgs, mask)
     G_loss.backward()
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, real_logits, mask, 0.05)
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, hparams["GP Gamma"])
     D_loss.backward()
     optimizer_D.step()
 
