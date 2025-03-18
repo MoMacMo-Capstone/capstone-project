@@ -58,7 +58,7 @@ class FFResidualInner(nn.Module):
         pe_shape = (z.shape[0], self.pe_mean.shape[0], self.pe_mean.shape[1], self.pe_mean.shape[2])
         pe = self.pe_mean.expand(pe_shape)
 
-        if self.pe_var:
+        if self.pe_var != None:
             pe = pe + self.pe_var.expand(pe_shape) * torch.randn(pe_shape, device=z.device)
         z = self.block(torch.cat([z, pe], dim=1))
 
