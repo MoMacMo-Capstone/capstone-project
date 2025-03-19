@@ -192,12 +192,12 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
-resolution = (32, 32)
+resolution = (64, 64)
 batch_size = 256
-latent_dim = 8
+latent_dim = 16
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 
 G = Generator(latent_dim, resolution).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
@@ -228,8 +228,8 @@ loss_function = nn.BCELoss()
 # ])
 # train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
 # train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
-fid_metric_acc = FrechetInceptionDistance(feature = 2048)
-fid_metric = FrechetInceptionDistance(feature = 2048)
+fid_metric_acc = FrechetInceptionDistance(feature = 2048).to(device)
+fid_metric = FrechetInceptionDistance(feature = 2048).to(device)
 
 # mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
 # mask[:,:,:,9:21] = 1
