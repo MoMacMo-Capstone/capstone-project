@@ -68,7 +68,7 @@ class FFResidualBlock(nn.Module):
     def __init__(self, channels, pe_channels, resolution, add_noise=False):
         super(FFResidualBlock, self).__init__()
         self.inner1 = FFResidualInner(channels, pe_channels, resolution, add_noise)
-        self.inner2 = FFResidualInner(channels, pe_channels, resolution, add_noise, dilation=resolution[0] // 4)
+        self.inner2 = FFResidualInner(channels, pe_channels, resolution, add_noise, dilation=4)
 
     def forward(self, z):
         orig = z
@@ -192,12 +192,12 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
-resolution = (64, 64)
+resolution = (32, 32)
 batch_size = 256
-latent_dim = 16
+latent_dim = 8
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 G = Generator(latent_dim, resolution).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
@@ -208,11 +208,11 @@ print("D params:", sum(p.numel() for p in D.parameters()))
 writer = SummaryWriter()
 
 hparams = {
-    "G lr": 5e-4,
-    "D lr": 1e-3,
+    "G lr": 1e-3,
+    "D lr": 2e-3,
     "G beta2": 0.9,
     "D beta2": 0.9,
-    "GP Gamma": 1.0,
+    "GP Gamma": 0.3,
 }
 
 for name, value in hparams.items():
