@@ -297,7 +297,7 @@ def prepare_for_fid(imgs):
 
 resolution = (64, 64)
 batch_size = 256
-latent_dim = 16
+latent_dim = 8
 epoch = 0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -305,6 +305,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
+
+# print("G params:", sum(p.numel() for p in G.parameters()))
+# print("D params:", sum(p.numel() for p in D.parameters()))
+# exit()
 
 writer = SummaryWriter()
 
