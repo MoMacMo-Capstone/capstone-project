@@ -272,9 +272,13 @@ def discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
 def color_images(images):
     return torch.cat([images.relu(), torch.zeros_like(images), (-images).relu()], dim=1)
 
-def interpolate(epoch, epochs, start, end):
-    a = max(min(epoch / (epochs - 1), 1), 0)
-    return start * (1 - a) + end * a
+def interpolate(x, x0, x1, y0, y1):
+    if x <= x0:
+        return y0
+    elif x >= x1:
+        return y1
+
+    return (x - x0) * (y1 - y0) / (x1 - x0) + y0
 
 def interpolate_exponential(x, x0, x1, y0, y1):
     if x <= x0:
@@ -291,30 +295,36 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
-resolution = (32, 32)
+resolution = (64, 64)
 batch_size = 256
-latent_dim = 4
+latent_dim = 16
 epoch = 0
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
 
-print("G params:", sum(p.numel() for p in G.parameters()))
-print("D params:", sum(p.numel() for p in D.parameters()))
-
 writer = SummaryWriter()
 
 hparams = {
-    "G lr": 1e-4,
-    "D lr": 2e-4,
-    "G beta2": 0.99,
-    "D beta2": 0.99,
-    "GP Gamma": 0.1,
+    "G lr 0": 1e-3,
+    "G lr 1": 1e-4,
+    "D lr 0": 2e-3,
+    "D lr 1": 2e-4,
+    "G beta2 0": 0.9,
+    "G beta2 1": 0.99,
+    "D beta2 0": 0.9,
+    "D beta2 1": 0.99,
+    "GP Gamma 0": 1.0,
+    "GP Gamma 1": 0.1,
+    "Warmup": 5000,
+    "Batch size": batch_size,
+    "G params": sum(p.numel() for p in G.parameters()),
+    "D params": sum(p.numel() for p in D.parameters()),
 }
-checkpoint = "checkpoint_2_2200.ckpt"
+checkpoint = None
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
@@ -325,8 +335,8 @@ if checkpoint:
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
 
-optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr"], betas=(0.0, hparams["G beta2"]))
-optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr"], betas=(0.0, hparams["D beta2"]))
+optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr 0"], betas=(0.0, hparams["G beta2 0"]))
+optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr 0"], betas=(0.0, hparams["D beta2 0"]))
 loss_function = nn.BCELoss()
 
 # transform = transforms.Compose([
@@ -344,6 +354,20 @@ fid_metric = FrechetInceptionDistance(feature = 2048).to(device)
 
 while True:
     epoch += 1
+
+    G_lr = interpolate_exponential(epoch, 1, hparams["Warmup"], hparams["G lr 0"], hparams["G lr 1"])
+    G_beta2 = interpolate(epoch, 1, hparams["Warmup"], hparams["G beta2 0"], hparams["G beta2 1"])
+    D_lr = interpolate_exponential(epoch, 1, hparams["Warmup"], hparams["D lr 0"], hparams["D lr 1"])
+    D_beta2 = interpolate(epoch, 1, hparams["Warmup"], hparams["D beta2 0"], hparams["D beta2 1"])
+    GP_gamma = interpolate_exponential(epoch, 1, hparams["Warmup"], hparams["GP Gamma 0"], hparams["GP Gamma 1"])
+
+    for param_group in optimizer_G.param_groups:
+        param_group['lr'] = G_lr
+        param_group['betas'] = (0, G_beta2)
+
+    for param_group in optimizer_D.param_groups:
+        param_group['lr'] = D_lr
+        param_group['betas'] = (0, D_beta2)
 
     real_imgs = read_seismic_data.get_chunks(batch_size, resolution[0])
     real_imgs = torch.tensor(real_imgs, device=device)
@@ -365,7 +389,7 @@ while True:
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, hparams["GP Gamma"])
+    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, GP_gamma)
     D_loss.backward()
     optimizer_D.step()
 
