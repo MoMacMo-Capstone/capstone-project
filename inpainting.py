@@ -84,6 +84,10 @@ def extract_patches(x, patch_size):
         Tensor: Extracted patches with shape 
                 (B, C * patch_size * patch_size, H // patch_size, W // patch_size)
     """
+
+    if type(patch_size) == type(0):
+        patch_size = (patch_size, patch_size)
+
     # Create an unfold module with kernel_size and stride equal to patch_size.
     unfold = nn.Unfold(kernel_size=patch_size, stride=patch_size)
     
@@ -92,8 +96,8 @@ def extract_patches(x, patch_size):
     patches = unfold(x)
     
     # Reshape to (B, C * patch_size * patch_size, H // patch_size, W // patch_size)
-    H_patches = x.shape[2] // patch_size
-    W_patches = x.shape[3] // patch_size
+    H_patches = x.shape[2] // patch_size[0]
+    W_patches = x.shape[3] // patch_size[1]
     patches = patches.view(x.shape[0], -1, H_patches, W_patches)
     
     return patches
@@ -109,12 +113,15 @@ def reconstruct_from_patches(patches, patch_size):
     Returns:
         Tensor: Reconstructed image of shape (B, C, H_patches * patch_size, W_patches * patch_size)
     """
+    if type(patch_size) == type(0):
+        patch_size = (patch_size, patch_size)
+
     B, patch_dim, H_patches, W_patches = patches.shape
     # Reshape patches to (B, patch_dim, L) with L = H_patches * W_patches.
     patches = patches.view(B, patch_dim, -1)
     
     # Define output size
-    output_size = (H_patches * patch_size, W_patches * patch_size)
+    output_size = (H_patches * patch_size[0], W_patches * patch_size[1])
     
     # Create a fold module matching the patch parameters.
     fold = nn.Fold(output_size=output_size, kernel_size=patch_size, stride=patch_size)
@@ -129,14 +136,16 @@ class FFPatches(nn.Module):
         super(FFPatches, self).__init__()
         self.n_patches = n_patches
 
-        inner_channels = 2 * channels * n_patches ** 2
+        total_patches = n_patches[0] * n_patches[1]
+
+        inner_channels = 2 * channels * total_patches
 
         self.block = nn.Sequential(
-            nn.Conv2d(inner_channels, inner_channels * 2, 1, groups=n_patches ** 2),
+            nn.Conv2d(inner_channels, inner_channels * 2, 1, groups=total_patches),
             nn.LeakyReLU(0.2),
             nn.Conv2d(inner_channels * 2, inner_channels * 2, 3, groups=max(inner_channels // 8, 1), padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(inner_channels * 2, inner_channels, 1, groups=n_patches ** 2, bias=False),
+            nn.Conv2d(inner_channels * 2, inner_channels, 1, groups=total_patches, bias=False),
         )
 
     def forward(self, z):
@@ -155,63 +164,27 @@ class FFPatches(nn.Module):
 
         return z
 
-class UNET(nn.Module):
-    def __init__(self, channels, resolution, add_noise=False):
-        super(UNET, self).__init__()
-        self.block1 = nn.Sequential(
-            FFResidualBlock(channels, channels // 2, resolution, add_noise),
-            ResidualBlock(channels),
-        )
-        self.block2 = nn.Sequential(
-            FFResidualBlock(channels, channels // 2, resolution, add_noise),
-            ResidualBlock(channels),
-        )
-
-        if min(resolution[0], resolution[1]) > 4:
-            self.downscale = nn.Conv2d(channels, channels * 2, 3, padding=1, bias=False)
-            self.inner = UNET(channels * 2, (resolution[0] // 2, resolution[1] // 2), add_noise)
-            self.upscale = nn.Conv2d(channels * 2, channels, 3, padding=1, bias=False)
-        else:
-            self.downscale = None
-            self.inner = None
-            self.upscale = None
-
-    def forward(self, z):
-        z = self.block1(z)
-
-        if self.downscale != None and self.inner != None and self.upscale != None:
-            orig = z
-
-            z = self.downscale(z)
-            z = nn.functional.interpolate(z, scale_factor=0.5, mode="bilinear")
-            z = self.inner(z)
-            z = nn.functional.interpolate(z, size=orig.shape[2:], mode="bilinear")
-            z = self.upscale(z)
-
-            z = z + orig
-
-        z = self.block2(z)
-
-        return z
-
 class Generator(nn.Module):
-    def __init__(self, latent_dim, resolution):
+    def __init__(self, latent_dim):
         super(Generator, self).__init__()
         self.model = nn.Sequential(
             nn.Conv2d(4, latent_dim, 1, bias=False),
-            # UNET(latent_dim, resolution, add_noise=True),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 1),
+            FFPatches(latent_dim, (1, 1)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 2),
+            FFPatches(latent_dim, (2, 2)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 4),
+            FFPatches(latent_dim, (4, 4)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 4),
+            FFPatches(latent_dim, (8, 1)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 2),
+            FFPatches(latent_dim, (1, 8)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 1),
+            FFPatches(latent_dim, (4, 4)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (2, 2)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (1, 1)),
             ResidualBlock(latent_dim),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
@@ -224,26 +197,27 @@ class Generator(nn.Module):
         return torch.where(mask, inpainted, original)
 
 class Discriminator(nn.Module):
-    def __init__(self, latent_dim, resolution):
+    def __init__(self, latent_dim):
         super(Discriminator, self).__init__()
 
         self.convs = nn.Sequential(
             nn.Conv2d(3, latent_dim, 1),
-            # UNET(latent_dim, resolution, add_noise=False)
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 1),
+            FFPatches(latent_dim, (1, 1)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 2),
+            FFPatches(latent_dim, (2, 2)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 4),
+            FFPatches(latent_dim, (4, 4)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 4),
+            FFPatches(latent_dim, (8, 1)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 4),
+            FFPatches(latent_dim, (1, 8)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 2),
+            FFPatches(latent_dim, (4, 4)),
             ResidualBlock(latent_dim),
-            FFPatches(latent_dim, 1),
+            FFPatches(latent_dim, (2, 2)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (1, 1)),
             ResidualBlock(latent_dim),
         )
         self.linear = nn.Linear(latent_dim, 1)
@@ -325,8 +299,8 @@ epoch = 0
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator(latent_dim, resolution).to(device)
-D = Discriminator(latent_dim, resolution).to(device)
+G = Generator(latent_dim).to(device)
+D = Discriminator(latent_dim).to(device)
 
 print("G params:", sum(p.numel() for p in G.parameters()))
 print("D params:", sum(p.numel() for p in D.parameters()))
@@ -336,11 +310,11 @@ writer = SummaryWriter()
 hparams = {
     "G lr": 1e-4,
     "D lr": 2e-4,
-    "G beta2": 0.9,
-    "D beta2": 0.9,
-    "GP Gamma": 1.0,
+    "G beta2": 0.99,
+    "D beta2": 0.99,
+    "GP Gamma": 0.1,
 }
-checkpoint = None
+checkpoint = "checkpoint_2_2200.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
@@ -419,4 +393,4 @@ while True:
             "generator": G.state_dict(),
             "discriminator": D.state_dict(),
             "epoch": epoch,
-        }, f"checkpoint_2_{epoch}.ckpt")
+        }, f"checkpoint_3_{epoch}.ckpt")
