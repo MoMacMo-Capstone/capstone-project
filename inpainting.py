@@ -255,26 +255,29 @@ def generator_loss(discriminator, fake_samples, real_samples, mask):
 
     return adversarial_loss
 
-def discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
+def backward_discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
     fake_samples = fake_samples.detach().requires_grad_(True)
     real_samples = real_samples.detach().requires_grad_(True)
 
     fake_logits = discriminator(fake_samples, mask)
     real_logits = discriminator(real_samples, mask)
 
+    relativistic_logits = real_logits - fake_logits
+    adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
+    adversarial_loss.backward(retain_graph=True)
+
     # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
     # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
     r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    r1_penalty.backward()
     r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
-
-    relativistic_logits = real_logits - fake_logits
-    adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
+    r2_penalty.backward()
 
     writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), epoch)
     writer.add_scalar("Loss/R1 Penalty", r1_penalty.item(), epoch)
     writer.add_scalar("Loss/R2 Penalty", r2_penalty.item(), epoch)
 
-    discriminator_loss = adversarial_loss + (gamma / 2) * (r1_penalty + r2_penalty)
+    discriminator_loss = adversarial_loss.item() + (gamma / 2) * (r1_penalty.item() + r2_penalty.item())
     return discriminator_loss
 
 def color_images(images):
@@ -303,13 +306,13 @@ def prepare_for_fid(imgs):
     imgs = imgs.broadcast_to((imgs.shape[0], 3, imgs.shape[2], imgs.shape[3]))
     return imgs
 
-resolution = (64, 64)
+resolution = (32, 32)
 batch_size = 256
-latent_dim = 8
+latent_dim = 4
 epoch = 0
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 G = Generator(latent_dim).to(device)
 D = Discriminator(latent_dim).to(device)
@@ -401,8 +404,7 @@ while True:
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = discriminator_loss(D, fake_imgs, real_imgs, mask, GP_gamma)
-    D_loss.backward()
+    D_loss = backward_discriminator_loss(D, fake_imgs, real_imgs, mask, GP_gamma)
     optimizer_D.step()
 
     grid = torch.cat([
@@ -415,7 +417,7 @@ while True:
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, epoch)
 
-    print(f"Epoch {epoch}: D Loss: {D_loss.item()}, G Loss: {G_loss.item()}")
+    print(f"Epoch {epoch}: D Loss: {D_loss}, G Loss: {G_loss.item()}")
 
     if epoch % 200 == 0:
         fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
