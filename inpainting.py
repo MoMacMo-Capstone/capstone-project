@@ -136,7 +136,7 @@ class Discriminator(nn.Module):
         return self.model(inpainted)
 
 def zero_centered_gradient_penalty(Samples, Critics):
-    Gradient, = torch.autograd.grad(outputs=Critics.mean((2, 3)).sum(), inputs=Samples, create_graph=True)
+    Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
     return Gradient.square().sum([1, 2, 3]).mean()
 
 def masked_zero_centered_gradient_penalty(samples, critics, mask):
@@ -144,44 +144,38 @@ def masked_zero_centered_gradient_penalty(samples, critics, mask):
     grad *= mask
     return grad.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, imgs1, imgs2, mask):
-    logits1 = discriminator(imgs1)
-    logits2 = discriminator(imgs2)
+def generator_loss(discriminator, imgs, mask):
+    logits = discriminator(imgs)
 
-    logits1 = torch.where(mask, logits1, -logits1)
-    logits2 = torch.where(mask, logits2, -logits2)
+    mask_logit = logits.masked_fill(~mask, 0).sum((2, 3)) / mask.to(torch.float32).sum((2, 3))
+    inv_mask_logit = logits.masked_fill(mask, 0).sum((2, 3)) / (~mask).to(torch.float32).sum((2, 3))
 
-    relativistic_logits = logits1 - logits2
+    relativistic_logits = mask_logit - inv_mask_logit
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
 
     writer.add_scalar("Loss/Generator Loss", adversarial_loss.item(), epoch)
 
     return adversarial_loss
 
-def backward_discriminator_loss(discriminator, imgs1, imgs2, mask, gamma):
-    imgs1 = imgs1.detach().requires_grad_(True)
-    imgs2 = imgs2.detach().requires_grad_(True)
+def backward_discriminator_loss(discriminator, imgs, mask, gamma):
+    imgs = imgs.detach().requires_grad_(True)
 
-    logits1 = discriminator(imgs1)
-    logits2 = discriminator(imgs2)
+    logits = discriminator(imgs)
 
-    logits1 = torch.where(mask, logits1, -logits1)
-    logits2 = torch.where(mask, logits2, -logits2)
+    mask_logit = logits.masked_fill(~mask, 0).sum((2, 3)) / mask.to(torch.float32).sum((2, 3))
+    inv_mask_logit = logits.masked_fill(mask, 0).sum((2, 3)) / (~mask).to(torch.float32).sum((2, 3))
 
-    relativistic_logits = logits2 - logits1
+    relativistic_logits = inv_mask_logit - mask_logit
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
     adversarial_loss.backward(retain_graph=True)
 
-    r1_penalty = zero_centered_gradient_penalty(imgs2, logits2)
+    r1_penalty = zero_centered_gradient_penalty(imgs, relativistic_logits)
     r1_penalty.backward()
-    r2_penalty = zero_centered_gradient_penalty(imgs1, logits1)
-    r2_penalty.backward()
 
     writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), epoch)
     writer.add_scalar("Loss/R1 Penalty", r1_penalty.item(), epoch)
-    writer.add_scalar("Loss/R2 Penalty", r2_penalty.item(), epoch)
 
-    discriminator_loss = adversarial_loss.item() + (gamma / 2) * (r1_penalty.item() + r2_penalty.item())
+    discriminator_loss = adversarial_loss.item() + gamma * r1_penalty.item()
     return discriminator_loss
 
 def color_images(images):
@@ -259,7 +253,6 @@ for name, value in hparams.items():
 optimizer_G1 = optim.AdamW(G1.parameters(), lr=1e-3, betas=(0.9, 0.99))
 optimizer_G2 = optim.AdamW(G2.parameters(), lr=hparams["G lr 0"], betas=(0.0, hparams["G beta2 0"]))
 optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr 0"], betas=(0.0, hparams["D beta2 0"]))
-loss_function = nn.BCELoss()
 
 # transform = transforms.Compose([
     # transforms.ToTensor(),
@@ -300,37 +293,33 @@ while True:
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
     mask = torch.tensor(mask, device=device)
 
-    imgs1_stage1 = G1(real_imgs, mask)
-    imgs2_stage1 = G1(real_imgs, ~mask)
+    fake_imgs1 = G1(real_imgs, mask)
 
     optimizer_G1.zero_grad()
-    G1_loss = (imgs1_stage1 - imgs2_stage1).abs().mean()
+    G1_loss = (fake_imgs1 - real_imgs).abs().mean()
     G1_loss.backward()
     optimizer_G1.step()
 
     writer.add_scalar("Loss/L1 loss stage 1", G1_loss, epoch)
 
-    imgs1_stage2 = G2(imgs1_stage1.detach(), mask)
-    imgs2_stage2 = G2(imgs2_stage1.detach(), ~mask)
+    fake_imgs2 = G2(fake_imgs1.detach(), mask)
 
-    writer.add_scalar("Metrics/L1 loss", (imgs1_stage2 - imgs2_stage2).abs().mean(), epoch)
+    writer.add_scalar("Metrics/L1 loss", (fake_imgs2 - real_imgs).abs().mean(), epoch)
 
     optimizer_G2.zero_grad()
-    G2_loss = generator_loss(D, imgs1_stage2, imgs2_stage2, mask)
+    G2_loss = generator_loss(D, fake_imgs2, mask)
     G2_loss.backward()
     optimizer_G2.step()
 
     optimizer_D.zero_grad()
-    D_loss = backward_discriminator_loss(D, imgs1_stage2, imgs2_stage2, mask, GP_gamma)
+    D_loss = backward_discriminator_loss(D, fake_imgs2, mask, GP_gamma)
     optimizer_D.step()
 
     grid = torch.cat([
+        real_imgs[:32, 0:1],
         real_imgs[:32, 0:1].masked_fill(mask[:32, 0:1], 0),
-        imgs1_stage1[:32, 0:1],
-        imgs1_stage2[:32, 0:1],
-        real_imgs[:32, 0:1].masked_fill(~mask[:32, 0:1], 0),
-        imgs2_stage1[:32, 0:1],
-        imgs2_stage2[:32, 0:1],
+        fake_imgs1[:32, 0:1],
+        fake_imgs2[:32, 0:1],
     ], 0)
     grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
@@ -343,7 +332,7 @@ while True:
         fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
         fid_metric.reset()
         fid_metric.merge_state(fid_metric_acc)
-        fid_metric.update(prepare_for_fid(imgs1_stage2), real = False)
+        fid_metric.update(prepare_for_fid(fake_imgs2), real = False)
         fid_score = fid_metric.compute()
         print(f"FID: {fid_score}")
         writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
