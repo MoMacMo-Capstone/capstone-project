@@ -7,9 +7,9 @@ def get_random_chunk(data, chunk_size=32):
     z = np.random.randint(200, data.shape[3])
 
     chunk = np.array(data[w, x:x + chunk_size, y:y + chunk_size, z])
-    norm = np.max(np.abs(chunk))
-    if norm != 0:
-        chunk /= norm
+    # norm = np.max(np.abs(chunk))
+    # if norm != 0:
+        # chunk /= norm
 
     return chunk
 
@@ -30,6 +30,11 @@ with open("SegActi-45x201x201x614.bin", "rb") as f:
     z = 614
     num_elements = w * x * y * z
     data = np.frombuffer(f.read(num_elements * 4), dtype="f4").reshape(w, x, y, z)
+
+data = np.array(data)
+# norm = np.sqrt(np.square(data).mean((2, 3), keepdims=True))
+# norm = np.abs(data).mean((2, 3), keepdims=True)
+data /= np.abs(data).max((2, 3), keepdims=True) / 2
 
 def get_chunk(chunk_size=32):
     return random_rotate_and_mirror(get_random_chunk(data, chunk_size))
