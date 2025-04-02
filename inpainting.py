@@ -33,6 +33,14 @@ def pink_noise(shape):
 def leaky_relu(z):
     return nn.functional.leaky_relu(z, 0.2)
 
+def noise_to_inpainting(noise, mean, stdev, mask):
+    inpainting = noise * stdev + mean
+    return torch.where(mask, inpainting, mean)
+
+def inpainting_to_noise(image, mean, stdev, mask):
+    noise = ((image - mean) / stdev).clamp(-3, 3)
+    return noise.masked_fill(~mask, 0)
+
 def abs_norm(images):
     return images.abs().amax(2, keepdim=True).amax(3, keepdim=True) + 1e-9
 
@@ -103,12 +111,12 @@ class UNET(nn.Module):
 
         return z
 
-class Generator(nn.Module):
-    def __init__(self, latent_dim, resolution, inject_noise):
-        super(Generator, self).__init__()
+class MeanEstimator(nn.Module):
+    def __init__(self, latent_dim, resolution):
+        super(MeanEstimator, self).__init__()
         self.model = nn.Sequential(
             nn.Conv2d(2, latent_dim, 1, bias=False),
-            UNET(latent_dim, resolution, inject_noise),
+            UNET(latent_dim, resolution),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
 
@@ -116,24 +124,57 @@ class Generator(nn.Module):
         original = original.masked_fill(mask, 0)
         norm = abs_norm(original)
 
-        original = original / norm
-        inpainted = self.model(torch.cat([original, mask], dim = 1))
+        inpainted = self.model(torch.cat([original / norm, mask], dim = 1))
         inpainted = inpainted * norm
 
         return torch.where(mask, inpainted, original)
+
+class VarEstimator(nn.Module):
+    def __init__(self, latent_dim, resolution):
+        super(VarEstimator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(2, latent_dim, 1, bias=False),
+            UNET(latent_dim, resolution),
+            nn.Conv2d(latent_dim, 1, 1, bias=False),
+        )
+
+    def forward(self, mean, mask):
+        norm = abs_norm(mean)
+
+        output = self.model(torch.cat([mean / norm, mask], dim = 1))
+        output = output.abs() + 1e-9
+        output = output * norm
+
+        return output.masked_fill(~mask, 0)
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim, resolution):
+        super(Generator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, latent_dim, 1, bias=False),
+            UNET(latent_dim, resolution, inject_noise=True),
+            nn.Conv2d(latent_dim, 1, 1, bias=False),
+        )
+
+    def forward(self, mean, stdev, mask):
+        norm = abs_norm(mean)
+
+        noise = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
+
+        return noise.masked_fill(~mask, 0)
 
 class Discriminator(nn.Module):
     def __init__(self, latent_dim, resolution):
         super(Discriminator, self).__init__()
 
         self.convs = nn.Sequential(
-            nn.Conv2d(3, latent_dim, 1, bias=False),
+            nn.Conv2d(4, latent_dim, 1, bias=False),
             UNET(latent_dim, resolution),
         )
         self.linear = nn.Linear(latent_dim, 1)
 
-    def forward(self, inpainted, mask):
-        z = torch.cat([inpainted, mask], dim=1)
+    def forward(self, noise, mean, stdev, mask):
+        z = torch.cat([noise, mean.detach(), stdev.detach(), mask], dim=1)
         z = self.convs(z).mean((2, 3))
         return self.linear(z)
 
@@ -141,14 +182,9 @@ def zero_centered_gradient_penalty(Samples, Critics):
     Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
     return Gradient.square().sum([1, 2, 3]).mean()
 
-def masked_zero_centered_gradient_penalty(samples, critics, mask):
-    grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
-    grad *= mask
-    return grad.square().sum([1, 2, 3]).mean()
-
-def generator_loss(discriminator, fake_samples, real_samples, mask):
-    fake_logits = discriminator(fake_samples, mask)
-    real_logits = discriminator(real_samples, mask)
+def generator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask):
+    fake_logits = discriminator(fake_noise, mean, stdev, mask)
+    real_logits = discriminator(real_noise, mean, stdev, mask).detach()
 
     relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -157,22 +193,20 @@ def generator_loss(discriminator, fake_samples, real_samples, mask):
 
     return adversarial_loss
 
-def backward_discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
-    fake_samples = fake_samples.detach().requires_grad_(True)
-    real_samples = real_samples.detach().requires_grad_(True)
+def backward_discriminator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask, gamma):
+    fake_noise = fake_noise.detach().requires_grad_(True)
+    real_noise = real_noise.detach().requires_grad_(True)
 
-    fake_logits = discriminator(fake_samples, mask)
-    real_logits = discriminator(real_samples, mask)
+    fake_logits = discriminator(fake_noise, mean, stdev, mask)
+    real_logits = discriminator(real_noise, mean, stdev, mask)
 
     relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
     adversarial_loss.backward(retain_graph=True)
 
-    # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
-    # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
-    r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    r1_penalty = zero_centered_gradient_penalty(real_noise, real_logits)
     (r1_penalty * (gamma / 2)).backward()
-    r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
+    r2_penalty = zero_centered_gradient_penalty(fake_noise, fake_logits)
     (r2_penalty * (gamma / 2)).backward()
 
     writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), epoch)
@@ -214,7 +248,9 @@ epoch = 0
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator(latent_dim, resolution, inject_noise=True).to(device)
+Mean = MeanEstimator(latent_dim, resolution).to(device)
+Stdev = VarEstimator(latent_dim, resolution).to(device)
+G = Generator(latent_dim, resolution).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
 
 print("G params:", sum(p.numel() for p in G.parameters()))
@@ -243,7 +279,7 @@ checkpoint = None
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
-    G.load_state_dict(checkpoint["generator"])
+    G.load_state_dict(checkpoint["generator 1"])
     D.load_state_dict(checkpoint["discriminator"])
     epoch = checkpoint["epoch"]
 
@@ -252,6 +288,7 @@ for name, value in hparams.items():
 
 optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr 0"], betas=(0.0, hparams["G beta2 0"]))
 optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr 0"], betas=(0.0, hparams["D beta2 0"]))
+optimizer_M_STD = optim.AdamW(list(Mean.parameters()) + list(Stdev.parameters()), lr=1e-3, betas=(0.9, 0.99))
 
 # transform = transforms.Compose([
     # transforms.ToTensor(),
@@ -292,37 +329,41 @@ while True:
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
     mask = torch.tensor(mask, device=device)
 
-    # imgs1_stage1 = G1(real_imgs, mask)
-    # imgs2_stage1 = G1(real_imgs, ~mask)
+    mean = Mean(real_imgs, mask)
+    stdev = Stdev(mean.detach(), mask)
+    fake_noise = G(mean.detach(), stdev.detach(), mask)
 
-    # optimizer_G1.zero_grad()
-    # G1_loss = (imgs1_stage1 - imgs2_stage1).abs().mean()
-    # G1_loss.backward()
-    # optimizer_G1.step()
-
-    # writer.add_scalar("Loss/L1 loss stage 1", G1_loss, epoch)
-
-    # imgs1_stage2 = G(imgs1_stage1.detach(), mask)
-    # imgs2_stage2 = G(imgs2_stage1.detach(), ~mask)
-
-    fake_imgs = G(real_imgs, mask)
-    real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
+    fake_imgs = noise_to_inpainting(fake_noise, mean, stdev, mask)
+    real_noise = inpainting_to_noise(real_imgs, mean, stdev, mask)
 
     writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), epoch)
+    writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), epoch)
+
+    optimizer_M_STD.zero_grad()
+    M_Loss = (mean - real_imgs).square().mean()
+    STD_Loss = (stdev.square() - (mean - real_imgs).square()).square().mean()
+    (M_Loss + STD_Loss).backward()
+    optimizer_M_STD.step()
+
+    writer.add_scalar("Loss/Mean loss", M_Loss, epoch)
+    writer.add_scalar("Loss/Stdev loss", STD_Loss, epoch)
 
     optimizer_G.zero_grad()
-    G_loss = generator_loss(D, fake_imgs, real_imgs, mask)
+    G_loss = generator_loss(D, fake_noise, real_noise, mean, stdev, mask)
     G_loss.backward()
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = backward_discriminator_loss(D, fake_imgs, real_imgs, mask, GP_gamma)
+    D_loss = backward_discriminator_loss(D, fake_noise, real_noise, mean, stdev, mask, GP_gamma)
     optimizer_D.step()
 
     grid = torch.cat([
         real_imgs[:32, 0:1],
-        real_imgs[:32, 0:1].masked_fill(mask[:32, 0:1], 0),
+        stdev[:32, 0:1],
+        mean[:32, 0:1],
         fake_imgs[:32, 0:1],
+        fake_noise[:32, 0:1],
+        real_noise[:32, 0:1],
     ], 0)
     grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
