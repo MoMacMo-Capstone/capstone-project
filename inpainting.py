@@ -126,17 +126,19 @@ class Discriminator(nn.Module):
     def __init__(self, latent_dim, resolution):
         super(Discriminator, self).__init__()
 
-        self.model = nn.Sequential(
-            nn.Conv2d(1, latent_dim, 1, bias=False),
+        self.convs = nn.Sequential(
+            nn.Conv2d(3, latent_dim, 1, bias=False),
             UNET(latent_dim, resolution),
-            nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
+        self.linear = nn.Linear(latent_dim, 1)
 
-    def forward(self, inpainted):
-        return self.model(inpainted)
+    def forward(self, inpainted, mask):
+        z = torch.cat([inpainted, mask], dim=1)
+        z = self.convs(z).mean((2, 3))
+        return self.linear(z)
 
 def zero_centered_gradient_penalty(Samples, Critics):
-    Gradient, = torch.autograd.grad(outputs=Critics.mean((2, 3)).sum(), inputs=Samples, create_graph=True)
+    Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
     return Gradient.square().sum([1, 2, 3]).mean()
 
 def masked_zero_centered_gradient_penalty(samples, critics, mask):
@@ -144,38 +146,34 @@ def masked_zero_centered_gradient_penalty(samples, critics, mask):
     grad *= mask
     return grad.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, imgs1, imgs2, mask):
-    logits1 = discriminator(imgs1)
-    logits2 = discriminator(imgs2)
+def generator_loss(discriminator, fake_samples, real_samples, mask):
+    fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
 
-    logits1 = torch.where(mask, logits1, -logits1)
-    logits2 = torch.where(mask, logits2, -logits2)
-
-    relativistic_logits = logits1 - logits2
+    relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
 
     writer.add_scalar("Loss/Generator Loss", adversarial_loss.item(), epoch)
 
     return adversarial_loss
 
-def backward_discriminator_loss(discriminator, imgs1, imgs2, mask, gamma):
-    imgs1 = imgs1.detach().requires_grad_(True)
-    imgs2 = imgs2.detach().requires_grad_(True)
+def backward_discriminator_loss(discriminator, fake_samples, real_samples, mask, gamma):
+    fake_samples = fake_samples.detach().requires_grad_(True)
+    real_samples = real_samples.detach().requires_grad_(True)
 
-    logits1 = discriminator(imgs1)
-    logits2 = discriminator(imgs2)
+    fake_logits = discriminator(fake_samples, mask)
+    real_logits = discriminator(real_samples, mask)
 
-    logits1 = torch.where(mask, logits1, -logits1)
-    logits2 = torch.where(mask, logits2, -logits2)
-
-    relativistic_logits = logits2 - logits1
+    relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
     adversarial_loss.backward(retain_graph=True)
 
-    r1_penalty = zero_centered_gradient_penalty(imgs2, logits2)
-    r1_penalty.backward()
-    r2_penalty = zero_centered_gradient_penalty(imgs1, logits1)
-    r2_penalty.backward()
+    # r1_penalty = masked_zero_centered_gradient_penalty(real_samples, real_logits, mask)
+    # r2_penalty = masked_zero_centered_gradient_penalty(fake_samples, fake_logits, mask)
+    r1_penalty = zero_centered_gradient_penalty(real_samples, real_logits)
+    (r1_penalty * (gamma / 2)).backward()
+    r2_penalty = zero_centered_gradient_penalty(fake_samples, fake_logits)
+    (r2_penalty * (gamma / 2)).backward()
 
     writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), epoch)
     writer.add_scalar("Loss/R1 Penalty", r1_penalty.item(), epoch)
@@ -210,18 +208,16 @@ def interpolate_exponential(x, x0, x1, y0, y1):
 
 resolution = (32, 32)
 batch_size = 256
-latent_dim = 16
+latent_dim = 8
 epoch = 0
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G1 = Generator(latent_dim, resolution, inject_noise=False).to(device)
-G2 = Generator(latent_dim, resolution, inject_noise=True).to(device)
+G = Generator(latent_dim, resolution, inject_noise=True).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
 
-print("G1 params:", sum(p.numel() for p in G1.parameters()))
-print("G2 params:", sum(p.numel() for p in G2.parameters()))
+print("G params:", sum(p.numel() for p in G.parameters()))
 print("D params:", sum(p.numel() for p in D.parameters()))
 # exit()
 
@@ -230,8 +226,8 @@ writer = SummaryWriter()
 hparams = {
     "G lr 0": 1e-4,
     "G lr 1": 1e-5,
-    "D lr 0": 4e-4,
-    "D lr 1": 4e-5,
+    "D lr 0": 5e-4,
+    "D lr 1": 5e-5,
     "G beta2 0": 0.9,
     "G beta2 1": 0.99,
     "D beta2 0": 0.9,
@@ -240,26 +236,22 @@ hparams = {
     "GP Gamma 1": 0.1,
     "Warmup": 5000,
     "Batch size": batch_size,
-    "G1 params": sum(p.numel() for p in G1.parameters()),
-    "G2 params": sum(p.numel() for p in G2.parameters()),
+    "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
 checkpoint = None
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
-    G1.load_state_dict(checkpoint["generator 1"])
-    G2.load_state_dict(checkpoint["generator 2"])
+    G.load_state_dict(checkpoint["generator"])
     D.load_state_dict(checkpoint["discriminator"])
     epoch = checkpoint["epoch"]
 
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
 
-optimizer_G1 = optim.AdamW(G1.parameters(), lr=1e-3, betas=(0.9, 0.99))
-optimizer_G2 = optim.AdamW(G2.parameters(), lr=hparams["G lr 0"], betas=(0.0, hparams["G beta2 0"]))
+optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr 0"], betas=(0.0, hparams["G beta2 0"]))
 optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr 0"], betas=(0.0, hparams["D beta2 0"]))
-loss_function = nn.BCELoss()
 
 # transform = transforms.Compose([
     # transforms.ToTensor(),
@@ -285,7 +277,7 @@ while True:
     D_beta2 = 1 - interpolate_exponential(epoch, 1, warmup, 1 - hparams["D beta2 0"], 1 - hparams["D beta2 1"])
     GP_gamma = interpolate_exponential(epoch, 1, warmup, hparams["GP Gamma 0"], hparams["GP Gamma 1"])
 
-    for param_group in optimizer_G2.param_groups:
+    for param_group in optimizer_G.param_groups:
         param_group['lr'] = G_lr
         param_group['betas'] = (0, G_beta2)
 
@@ -300,56 +292,55 @@ while True:
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
     mask = torch.tensor(mask, device=device)
 
-    imgs1_stage1 = G1(real_imgs, mask)
-    imgs2_stage1 = G1(real_imgs, ~mask)
+    # imgs1_stage1 = G1(real_imgs, mask)
+    # imgs2_stage1 = G1(real_imgs, ~mask)
 
-    optimizer_G1.zero_grad()
-    G1_loss = (imgs1_stage1 - imgs2_stage1).abs().mean()
-    G1_loss.backward()
-    optimizer_G1.step()
+    # optimizer_G1.zero_grad()
+    # G1_loss = (imgs1_stage1 - imgs2_stage1).abs().mean()
+    # G1_loss.backward()
+    # optimizer_G1.step()
 
-    writer.add_scalar("Loss/L1 loss stage 1", G1_loss, epoch)
+    # writer.add_scalar("Loss/L1 loss stage 1", G1_loss, epoch)
 
-    imgs1_stage2 = G2(imgs1_stage1.detach(), mask)
-    imgs2_stage2 = G2(imgs2_stage1.detach(), ~mask)
+    # imgs1_stage2 = G(imgs1_stage1.detach(), mask)
+    # imgs2_stage2 = G(imgs2_stage1.detach(), ~mask)
 
-    writer.add_scalar("Metrics/L1 loss", (imgs1_stage2 - imgs2_stage2).abs().mean(), epoch)
+    fake_imgs = G(real_imgs, mask)
+    real_imgs, fake_imgs = torch.cat([real_imgs, fake_imgs], dim=1), torch.cat([fake_imgs, real_imgs], dim=1)
 
-    optimizer_G2.zero_grad()
-    G2_loss = generator_loss(D, imgs1_stage2, imgs2_stage2, mask)
-    G2_loss.backward()
-    optimizer_G2.step()
+    writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), epoch)
+
+    optimizer_G.zero_grad()
+    G_loss = generator_loss(D, fake_imgs, real_imgs, mask)
+    G_loss.backward()
+    optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = backward_discriminator_loss(D, imgs1_stage2, imgs2_stage2, mask, GP_gamma)
+    D_loss = backward_discriminator_loss(D, fake_imgs, real_imgs, mask, GP_gamma)
     optimizer_D.step()
 
     grid = torch.cat([
+        real_imgs[:32, 0:1],
         real_imgs[:32, 0:1].masked_fill(mask[:32, 0:1], 0),
-        imgs1_stage1[:32, 0:1],
-        imgs1_stage2[:32, 0:1],
-        real_imgs[:32, 0:1].masked_fill(~mask[:32, 0:1], 0),
-        imgs2_stage1[:32, 0:1],
-        imgs2_stage2[:32, 0:1],
+        fake_imgs[:32, 0:1],
     ], 0)
     grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, epoch)
 
-    print(f"Epoch {epoch}: D Loss: {D_loss:.05}, G1 loss: {G1_loss.item():.05}, G2 Loss: {G2_loss.item():.05}")
+    print(f"Epoch {epoch}: D Loss: {D_loss:.05}, G Loss: {G_loss.item():.05}")
 
     if epoch % 200 == 0:
         fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
         fid_metric.reset()
         fid_metric.merge_state(fid_metric_acc)
-        fid_metric.update(prepare_for_fid(imgs1_stage2), real = False)
+        fid_metric.update(prepare_for_fid(fake_imgs), real = False)
         fid_score = fid_metric.compute()
         print(f"FID: {fid_score}")
         writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
         torch.save({
-            "generator 1": G1.state_dict(),
-            "generator 2": G2.state_dict(),
+            "generator": G.state_dict(),
             "discriminator": D.state_dict(),
             "epoch": epoch,
         }, f"checkpoint_3_{epoch}.ckpt")
