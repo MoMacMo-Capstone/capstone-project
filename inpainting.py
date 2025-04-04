@@ -242,7 +242,7 @@ def interpolate_exponential(x, x0, x1, y0, y1):
 
 resolution = (32, 32)
 batch_size = 256
-latent_dim = 8
+latent_dim = 16
 epoch = 0
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -253,6 +253,8 @@ Stdev = VarEstimator(latent_dim, resolution).to(device)
 G = Generator(latent_dim, resolution).to(device)
 D = Discriminator(latent_dim, resolution).to(device)
 
+print("Mean params:", sum(p.numel() for p in Mean.parameters()))
+print("Stdev params:", sum(p.numel() for p in Stdev.parameters()))
 print("G params:", sum(p.numel() for p in G.parameters()))
 print("D params:", sum(p.numel() for p in D.parameters()))
 # exit()
@@ -279,7 +281,9 @@ checkpoint = None
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
-    G.load_state_dict(checkpoint["generator 1"])
+    Mean.load_state_dict(checkpoint["mean"])
+    Stdev.load_state_dict(checkpoint["stdev"])
+    G.load_state_dict(checkpoint["generator"])
     D.load_state_dict(checkpoint["discriminator"])
     epoch = checkpoint["epoch"]
 
@@ -381,6 +385,8 @@ while True:
         print(f"FID: {fid_score}")
         writer.add_scalar("Metrics/FID", fid_score.item(), epoch)
         torch.save({
+            "mean": Mean.state_dict(),
+            "stdev": Stdev.state_dict(),
             "generator": G.state_dict(),
             "discriminator": D.state_dict(),
             "epoch": epoch,
