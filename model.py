@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 
-resolution = (32, 32)
-latent_dim = 16
+resolution = (64, 64)
+latent_dim = 64
+mean_stdev_latent_dim = 64
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def pink_noise(shape):
     y = torch.fft.fftfreq(shape[2], device=device).view((1, 1, -1, 1))
@@ -106,9 +106,9 @@ class MeanEstimator(nn.Module):
     def __init__(self):
         super(MeanEstimator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(2, latent_dim, 1, bias=False),
-            UNET(latent_dim, resolution),
-            nn.Conv2d(latent_dim, 1, 1, bias=False),
+            nn.Conv2d(2, mean_stdev_latent_dim, 1, bias=False),
+            UNET(mean_stdev_latent_dim, resolution),
+            nn.Conv2d(mean_stdev_latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, original, mask):
@@ -124,9 +124,9 @@ class VarEstimator(nn.Module):
     def __init__(self):
         super(VarEstimator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(2, latent_dim, 1, bias=False),
-            UNET(latent_dim, resolution),
-            nn.Conv2d(latent_dim, 1, 1, bias=False),
+            nn.Conv2d(2, mean_stdev_latent_dim, 1, bias=False),
+            UNET(mean_stdev_latent_dim, resolution),
+            nn.Conv2d(mean_stdev_latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, mean, mask):

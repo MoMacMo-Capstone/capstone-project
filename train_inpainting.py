@@ -69,7 +69,6 @@ def interpolate_exponential(x, x0, x1, y0, y1):
 
     return y0 * (y1 / y0) ** ((x - x0) / (x1 - x0))
 
-resolution = (32, 32)
 batch_size = 256
 step = 0
 
@@ -87,10 +86,10 @@ print("D params:", sum(p.numel() for p in D.parameters()))
 writer = SummaryWriter()
 
 hparams = {
-    "G lr 0": 1e-4,
-    "G lr 1": 1e-5,
-    "D lr 0": 5e-4,
-    "D lr 1": 5e-5,
+    "G lr 0": 2.5e-5,
+    "G lr 1": 5e-6,
+    "D lr 0": 1e-4,
+    "D lr 1": 2e-5,
     "G beta2 0": 0.9,
     "G beta2 1": 0.99,
     "D beta2 0": 0.9,
@@ -102,15 +101,16 @@ hparams = {
     "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
-checkpoint = None
+checkpoint = "m_std_checkpoint_5000.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
     Mean.load_state_dict(checkpoint["mean"])
     Stdev.load_state_dict(checkpoint["stdev"])
-    if "generator" in checkpoint: G.load_state_dict(checkpoint["generator"])
-    if "discriminator" in checkpoint: D.load_state_dict(checkpoint["discriminator"])
-    step = checkpoint["step"]
+    if "generator" in checkpoint and "discriminator" in checkpoint:
+        G.load_state_dict(checkpoint["generator"])
+        D.load_state_dict(checkpoint["discriminator"])
+        step = checkpoint["step"]
 
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
@@ -157,8 +157,8 @@ while True:
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
     mask = torch.tensor(mask, device=device)
 
-    mean = Mean(real_imgs, mask)
-    stdev = Stdev(mean.detach(), mask)
+    mean = Mean(real_imgs, mask).detach()
+    stdev = Stdev(mean, mask).detach()
     fake_noise = G(mean.detach(), stdev.detach(), mask)
 
     fake_imgs = noise_to_inpainting(fake_noise, mean, stdev, mask)
@@ -203,4 +203,4 @@ while True:
             "generator": G.state_dict(),
             "discriminator": D.state_dict(),
             "step": step,
-        }, f"checkpoint_3_{step}.ckpt")
+        }, f"checkpoint_4_{step}.ckpt")

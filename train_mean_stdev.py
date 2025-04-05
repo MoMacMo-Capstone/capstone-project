@@ -22,7 +22,7 @@ print("Stdev params:", sum(p.numel() for p in Stdev.parameters()))
 writer = SummaryWriter()
 
 hparams = {
-    "lr": 1e-3,
+    "lr": 1e-4,
     "beta1": 0.9,
     "beta2": 0.99,
     "Steps": 5000,
@@ -41,7 +41,7 @@ if checkpoint:
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
 
-optimizer_M_STD = optim.AdamW(list(Mean.parameters()) + list(Stdev.parameters()), lr=1e-3, betas=(0.9, 0.99))
+optimizer_M_STD = optim.AdamW(list(Mean.parameters()) + list(Stdev.parameters()), lr=hparams["lr"], betas=(hparams["beta1"], hparams["beta2"]))
 
 while step < hparams["Steps"]:
     step += 1
