@@ -28,7 +28,7 @@ hparams = {
     "Mean params": sum(p.numel() for p in Mean.parameters()),
     "Stdev params": sum(p.numel() for p in Stdev.parameters()),
 }
-checkpoint = "m_std_128x128_32c_5000.ckpt"
+checkpoint = None
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
@@ -41,7 +41,8 @@ else:
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
 
-optimizer_M_STD = optim.AdamW(list(Mean.parameters()) + list(Stdev.parameters()), lr=hparams["lr"], betas=(hparams["beta1"], hparams["beta2"]))
+optimizer_Mean = optim.AdamW(Mean.parameters(), lr=hparams["lr"], betas=(hparams["beta1"], hparams["beta2"]))
+optimizer_Stdev = optim.AdamW(Stdev.parameters(), lr=hparams["lr"], betas=(hparams["beta1"], hparams["beta2"]))
 
 while step < hparams["Steps"]:
     step += 1
@@ -54,16 +55,21 @@ while step < hparams["Steps"]:
     mask = torch.tensor(mask, device=device)
 
     mean = Mean(real_imgs, mask)
+
+    optimizer_Mean.zero_grad()
+    Mean_Loss = (mean - real_imgs).square().mean()
+    Mean_Loss.backward()
+    optimizer_Mean.step()
+
     stdev = Stdev(mean.detach(), mask)
 
-    optimizer_M_STD.zero_grad()
-    M_Loss = (mean - real_imgs).square().mean()
-    STD_Loss = (stdev.square() - (mean - real_imgs).square()).square().mean()
-    (M_Loss + STD_Loss).backward()
-    optimizer_M_STD.step()
+    optimizer_Stdev.zero_grad()
+    Stdev_Loss = (stdev.square() - (mean - real_imgs).square()).square().mean()
+    Stdev_Loss.backward()
+    optimizer_Stdev.step()
 
-    writer.add_scalar("Loss/Mean loss", M_Loss, step)
-    writer.add_scalar("Loss/Stdev loss", STD_Loss, step)
+    writer.add_scalar("Loss/Mean loss", Mean_Loss, step)
+    writer.add_scalar("Loss/Stdev loss", Stdev_Loss, step)
 
     grid = torch.cat([
         real_imgs[:32, 0:1],
@@ -75,7 +81,7 @@ while step < hparams["Steps"]:
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, step)
 
-    print(f"Step {step}: Mean Loss: {M_Loss.item():.05}, Stdev Loss: {STD_Loss.item():.05}")
+    print(f"Step {step}: Mean Loss: {Mean_Loss.item():.05}, Stdev Loss: {STD_Loss.item():.05}")
 
     if step % 200 == 0:
         torch.save({
