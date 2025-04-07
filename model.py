@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 
-resolution = (64, 64)
-latent_dim = 64
-mean_stdev_latent_dim = 64
+resolution = (128, 128)
+latent_dim = 24
+mean_stdev_latent_dim = 32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -159,13 +159,14 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.convs = nn.Sequential(
-            nn.Conv2d(4, latent_dim, 1, bias=False),
+            nn.Conv2d(5, latent_dim, 1, bias=False),
             UNET(latent_dim, resolution),
         )
         self.linear = nn.Linear(latent_dim, 1)
 
     def forward(self, noise, mean, stdev, mask):
-        z = torch.cat([noise, mean.detach(), stdev.detach(), mask], dim=1)
+        img = noise_to_inpainting(noise, mean, stdev, mask)
+        z = torch.cat([img, noise, mean, stdev, mask], dim=1)
         z = self.convs(z).mean((2, 3))
         return self.linear(z)
 

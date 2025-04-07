@@ -9,9 +9,9 @@ def color_images(images):
     return torch.cat([images, images.abs() - 1, -images], dim=1).clamp(0, 1)
 
 def prepare_for_fid(imgs):
-    return (color_images(imgs) * 128).clamp(0, 255).to(torch.uint8)
+    return (color_images(imgs) * 256).clamp(0, 255).to(torch.uint8)
 
-resolution = (64, 64)
+resolution = (128, 128)
 batch_size = 256
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

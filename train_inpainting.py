@@ -17,7 +17,8 @@ def zero_centered_gradient_penalty(Samples, Critics):
 
 def generator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask):
     fake_logits = discriminator(fake_noise, mean, stdev, mask)
-    real_logits = discriminator(real_noise, mean, stdev, mask).detach()
+    with torch.no_grad():
+        real_logits = discriminator(real_noise, mean, stdev, mask)
 
     relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -51,7 +52,7 @@ def backward_discriminator_loss(discriminator, fake_noise, real_noise, mean, std
 
 def prepare_for_fid(imgs):
     imgs = imgs[:, 0:1]
-    return (color_images(imgs) * 128).clamp(0, 255).to(torch.uint8)
+    return (color_images(imgs) * 256).clamp(0, 255).to(torch.uint8)
 
 def interpolate(x, x0, x1, y0, y1):
     if x <= x0:
@@ -94,14 +95,16 @@ hparams = {
     "G beta2 1": 0.99,
     "D beta2 0": 0.9,
     "D beta2 1": 0.99,
-    "GP Gamma 0": 1.0,
-    "GP Gamma 1": 0.1,
+    "GP Gamma 0": 100.0,
+    "GP Gamma 1": 25.0,
     "Warmup": 5000,
     "Batch size": batch_size,
+    "Mean params": sum(p.numel() for p in Mean.parameters()),
+    "Stdev params": sum(p.numel() for p in Stdev.parameters()),
     "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
-checkpoint = "m_std_checkpoint_5000.ckpt"
+checkpoint = "m_std_128x128_32c_10000.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
@@ -110,7 +113,6 @@ if checkpoint:
     if "generator" in checkpoint and "discriminator" in checkpoint:
         G.load_state_dict(checkpoint["generator"])
         D.load_state_dict(checkpoint["discriminator"])
-        step = checkpoint["step"]
 
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
@@ -157,9 +159,10 @@ while True:
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
     mask = torch.tensor(mask, device=device)
 
-    mean = Mean(real_imgs, mask).detach()
-    stdev = Stdev(mean, mask).detach()
-    fake_noise = G(mean.detach(), stdev.detach(), mask)
+    with torch.no_grad():
+        mean = Mean(real_imgs, mask)
+        stdev = Stdev(mean, mask)
+    fake_noise = G(mean, stdev, mask)
 
     fake_imgs = noise_to_inpainting(fake_noise, mean, stdev, mask)
     real_noise = inpainting_to_noise(real_imgs, mean, stdev, mask)
@@ -182,7 +185,7 @@ while True:
         mean[:32, 0:1],
         fake_imgs[:32, 0:1],
     ], 0)
-    grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+    # grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, step)
@@ -203,4 +206,4 @@ while True:
             "generator": G.state_dict(),
             "discriminator": D.state_dict(),
             "step": step,
-        }, f"checkpoint_4_{step}.ckpt")
+        }, f"inpainting_{resolution[0]}x{resolution[1]}_{mean_stdev_latent_dim}c_{step}.ckpt")

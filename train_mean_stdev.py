@@ -10,8 +10,6 @@ import read_seismic_data
 from model import *
 
 batch_size = 256
-step = 0
-steps = 5000
 
 Mean = MeanEstimator().to(device)
 Stdev = VarEstimator().to(device)
@@ -25,18 +23,20 @@ hparams = {
     "lr": 1e-4,
     "beta1": 0.9,
     "beta2": 0.99,
-    "Steps": 5000,
+    "Steps": 10000,
     "Batch size": batch_size,
     "Mean params": sum(p.numel() for p in Mean.parameters()),
     "Stdev params": sum(p.numel() for p in Stdev.parameters()),
 }
-checkpoint = None
+checkpoint = "m_std_128x128_32c_5000.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
     Mean.load_state_dict(checkpoint["mean"])
     Stdev.load_state_dict(checkpoint["stdev"])
     step = checkpoint["step"]
+else:
+    step = 0
 
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
@@ -70,7 +70,7 @@ while step < hparams["Steps"]:
         stdev[:32, 0:1],
         mean[:32, 0:1],
     ], 0)
-    grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+    # grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
     grid = color_images(grid)
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, step)
@@ -82,4 +82,4 @@ while step < hparams["Steps"]:
             "mean": Mean.state_dict(),
             "stdev": Stdev.state_dict(),
             "step": step,
-        }, f"m_std_checkpoint_{step}.ckpt")
+        }, f"m_std_{resolution[0]}x{resolution[1]}_{mean_stdev_latent_dim}c_{step}.ckpt")
