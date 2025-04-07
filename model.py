@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 
 resolution = (128, 128)
-latent_dim = 24
-mean_stdev_latent_dim = 32
+latent_dim = 16
+mean_stdev_latent_dim = 24
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,8 +60,12 @@ class UNET(nn.Module):
         self.block1 = nn.Sequential(
             AOTBlock(channels),
             AOTBlock(channels),
+            AOTBlock(channels),
+            AOTBlock(channels),
         )
         self.block2 = nn.Sequential(
+            AOTBlock(channels),
+            AOTBlock(channels),
             AOTBlock(channels),
             AOTBlock(channels),
         )
@@ -186,7 +190,8 @@ class CombinedGenerator(nn.Module):
                 self.generator.load_state_dict(checkpoint["generator"])
 
     def forward(self, original, mask):
-        mean = self.mean_estimator(original, mask).detach()
-        stdev = self.stdev_estimator(mean, mask).detach()
+        with torch.no_grad():
+            mean = self.mean_estimator(original, mask)
+            stdev = self.stdev_estimator(mean, mask)
         noise = self.generator(mean, stdev, mask)
         return noise_to_inpainting(noise, mean, stdev, mask)
