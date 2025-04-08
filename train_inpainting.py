@@ -104,15 +104,15 @@ hparams = {
     "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
-checkpoint = "m_std_128x128_32c_10000.ckpt"
+checkpoint = "trained_64x64_305ee13_div1.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
     Mean.load_state_dict(checkpoint["mean"])
     Stdev.load_state_dict(checkpoint["stdev"])
-    if "generator" in checkpoint and "discriminator" in checkpoint:
-        G.load_state_dict(checkpoint["generator"])
-        D.load_state_dict(checkpoint["discriminator"])
+    # if "generator" in checkpoint and "discriminator" in checkpoint:
+        # G.load_state_dict(checkpoint["generator"])
+        # D.load_state_dict(checkpoint["discriminator"])
 
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
