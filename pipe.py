@@ -7,16 +7,24 @@ import torchvision
 # from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-import lama_mask
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.widgets import LassoSelector    # drawing
+from matplotlib.path import Path                # drawing
+# import lama_mask
+import draw_mask
 
 def fft(image):
-    image = torch.fft.rfft2(image)
-    return torch.cat([image.real, image.imag], dim=1)
+    ffted = torch.fft.fft2(image)
+    return torch.cat([ffted.real, ffted.imag], dim=1)
 
 def ifft(image):
     channels = image.shape[1] // 2
-    image = torch.complex(image[:,:channels], image[:,channels:])
-    return torch.fft.irfft2(image)
+    real = image[:, :channels]
+    imag = image[:, channels:]
+    complex_tensor = torch.complex(real, imag)
+    return torch.fft.ifft2(complex_tensor).real  # Only return the real part
 
 def leaky_relu(z):
     return nn.functional.leaky_relu(z, 0.2)
@@ -65,6 +73,7 @@ class FFResidualBlock(nn.Module):
         z = ifft(z)
 
         z = orig + z
+        
         orig_max = orig.amax(2, keepdim=True).amax(3, keepdim=True)
         orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
         z = z.clamp(orig_min, orig_max)
@@ -156,6 +165,7 @@ class FFPatches(nn.Module):
         z = ifft(z)
         z = reconstruct_from_patches(z, self.n_patches)
 
+        z = match_shape(z, orig) # fft reshape
         z = orig + z
         orig_max = orig.amax(2, keepdim=True).amax(3, keepdim=True)
         orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
@@ -299,7 +309,7 @@ hparams = {
     "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
-'''
+
 checkpoint = input("Enter the path to the checkpoint file (or press Enter to skip): ").strip()
 
 if checkpoint:
@@ -308,4 +318,76 @@ if checkpoint:
     D.load_state_dict(checkpoint["discriminator"])
     epoch = checkpoint["epoch"]
     print(f"Checkpoint loaded successfully at epoch {epoch}.")
+'''
+
+def load_checkpoint():
+
+    checkpoint = input("Enter the path to the checkpoint file: ").strip()
+    if checkpoint:
+        checkpoint = torch.load(checkpoint, map_location=torch.device('cpu'))
+        G.load_state_dict(checkpoint["generator"])
+        D.load_state_dict(checkpoint["discriminator"])
+        epoch = checkpoint["epoch"]
+        print(f"Checkpoint loaded successfully at epoch {epoch}.")
+        return checkpoint
+
+def match_shape(tensor, target):
+    # Pad or crop tensor to match the target shape
+    _, _, h, w = tensor.shape
+    _, _, H, W = target.shape
+    dh, dw = H - h, W - w
+    if dh > 0 or dw > 0:
+        tensor = nn.functional.pad(tensor, [0, dw, 0, dh])
+    elif dh < 0 or dw < 0:
+        tensor = tensor[:, :, :H, :W]
+    return tensor
+
+def infill_and_display(model, masked_volume, mask):
+    model.eval()
+    infilled_volume = masked_volume.copy()
+
+    with torch.no_grad():
+        for i in range(masked_volume.shape[2]):
+            slice_input = masked_volume[:, :, i]
+            slice_mask = mask[:, :, i]
+
+            input_tensor = torch.tensor(slice_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            mask_tensor = torch.tensor(slice_mask, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+
+            output = model(input_tensor, mask_tensor).squeeze().numpy()
+            infilled_volume[:, :, i][slice_mask] = output[slice_mask]
+            
+    '''
+    mid_slice = masked_volume.shape[2] // 2
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 3, 1)
+    plt.imshow(masked_volume[:, :, mid_slice], cmap="gray")
+    plt.title("Masked Input")
+
+    plt.subplot(1, 3, 2)
+    plt.imshow(mask[:, :, mid_slice], cmap="gray")
+    plt.title("Mask")
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(infilled_volume[:, :, mid_slice], cmap="gray")
+    plt.title("Infilled Output")
+    plt.tight_layout()
+    plt.show()
+    '''
+    
+    draw_mask.show_volume_with_slider(volume, mask, infilled_volume)
+
+if __name__ == "__main__":
+    checkpoint = load_checkpoint()
+    if checkpoint:
+        model = G  # Generator already loaded
+
+        with open("SegActi-45x201x201x614.bin", "rb") as f:
+            w, x, y, z = 45, 201, 201, 614
+            data = np.frombuffer(f.read(w * x * y * z * 4), dtype="f4").reshape(w, x, y, z)
+
+        volume = draw_mask.choose_volume(data)
+        masked_volume, mask = draw_mask.apply_mask(volume)
+        #print("mask applied.")
+        infill_and_display(model, masked_volume, mask)
 
