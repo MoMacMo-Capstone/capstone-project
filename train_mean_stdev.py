@@ -61,7 +61,8 @@ while step < hparams["Steps"]:
     Mean_Loss.backward()
     optimizer_Mean.step()
 
-    stdev = Stdev(mean.detach(), mask)
+    mean = mean.detach()
+    stdev = Stdev(mean, mask)
 
     optimizer_Stdev.zero_grad()
     Stdev_Loss = (stdev.square() - (mean - real_imgs).square()).square().mean()
@@ -81,7 +82,7 @@ while step < hparams["Steps"]:
     grid = torchvision.utils.make_grid(grid, nrow=32)
     writer.add_image("Images", grid, step)
 
-    print(f"Step {step}: Mean Loss: {Mean_Loss.item():.05}, Stdev Loss: {STD_Loss.item():.05}")
+    print(f"Step {step}: Mean Loss: {Mean_Loss.item():.05}, Stdev Loss: {Stdev_Loss.item():.05}")
 
     if step % 200 == 0:
         torch.save({
