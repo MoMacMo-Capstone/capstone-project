@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 
-resolution = (32, 32)
-latent_dim = 16
-mean_stdev_latent_dim = 16
+resolution = (64, 64)
+latent_dim = 64
+mean_stdev_latent_dim = 64
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 
 def pink_noise(shape):
     y = torch.fft.fftfreq(shape[2], device=device).view((1, 1, -1, 1))
@@ -189,5 +189,4 @@ class CombinedGenerator(nn.Module):
         with torch.no_grad():
             mean = self.mean_estimator(original, mask)
             stdev = self.stdev_estimator(mean, mask)
-        inpainted = self.generator(mean, stdev, mask)
-        return inpainted
+        return self.generator(mean, stdev, mask)
