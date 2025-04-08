@@ -15,10 +15,10 @@ def zero_centered_gradient_penalty(Samples, Critics):
     Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
     return Gradient.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask):
-    fake_logits = discriminator(fake_noise, mean, stdev, mask)
+def generator_loss(discriminator, fake_imgs, real_imgs, mean, stdev, mask):
+    fake_logits = discriminator(fake_imgs, mean, stdev, mask)
     with torch.no_grad():
-        real_logits = discriminator(real_noise, mean, stdev, mask)
+        real_logits = discriminator(real_imgs, mean, stdev, mask)
 
     relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -27,20 +27,20 @@ def generator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask):
 
     return adversarial_loss
 
-def backward_discriminator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask, gamma):
-    fake_noise = fake_noise.detach().requires_grad_(True)
-    real_noise = real_noise.detach().requires_grad_(True)
+def backward_discriminator_loss(discriminator, fake_imgs, real_imgs, mean, stdev, mask, gamma):
+    fake_imgs = fake_imgs.detach().requires_grad_(True)
+    real_imgs = real_imgs.detach().requires_grad_(True)
 
-    fake_logits = discriminator(fake_noise, mean, stdev, mask)
-    real_logits = discriminator(real_noise, mean, stdev, mask)
+    fake_logits = discriminator(fake_imgs, mean, stdev, mask)
+    real_logits = discriminator(real_imgs, mean, stdev, mask)
 
     relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
     adversarial_loss.backward(retain_graph=True)
 
-    r1_penalty = zero_centered_gradient_penalty(real_noise, real_logits)
+    r1_penalty = zero_centered_gradient_penalty(real_imgs, real_logits)
     (r1_penalty * (gamma / 2)).backward()
-    r2_penalty = zero_centered_gradient_penalty(fake_noise, fake_logits)
+    r2_penalty = zero_centered_gradient_penalty(fake_imgs, fake_logits)
     (r2_penalty * (gamma / 2)).backward()
 
     writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), step)
@@ -162,21 +162,18 @@ while True:
     with torch.no_grad():
         mean = Mean(real_imgs, mask)
         stdev = Stdev(mean, mask)
-    fake_noise = G(mean, stdev, mask)
-
-    fake_imgs = noise_to_inpainting(fake_noise, mean, stdev, mask)
-    real_noise = inpainting_to_noise(real_imgs, mean, stdev, mask)
+    fake_imgs = G(mean, stdev, mask)
 
     writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), step)
     writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), step)
 
     optimizer_G.zero_grad()
-    G_loss = generator_loss(D, fake_noise, real_noise, mean, stdev, mask)
+    G_loss = generator_loss(D, fake_imgs, real_imgs, mean, stdev, mask)
     G_loss.backward()
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = backward_discriminator_loss(D, fake_noise, real_noise, mean, stdev, mask, GP_gamma)
+    D_loss = backward_discriminator_loss(D, fake_imgs, real_imgs, mean, stdev, mask, GP_gamma)
     optimizer_D.step()
 
     grid = torch.cat([
