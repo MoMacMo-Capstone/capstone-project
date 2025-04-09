@@ -88,15 +88,15 @@ writer = SummaryWriter()
 
 hparams = {
     "G lr 0": 2.5e-5,
-    "G lr 1": 5e-6,
+    "G lr 1": 2.5e-6,
     "D lr 0": 1e-4,
-    "D lr 1": 2e-5,
+    "D lr 1": 1e-5,
     "G beta2 0": 0.9,
     "G beta2 1": 0.99,
     "D beta2 0": 0.9,
     "D beta2 1": 0.99,
-    "GP Gamma 0": 100.0,
-    "GP Gamma 1": 25.0,
+    "GP Gamma 0": 1.0,
+    "GP Gamma 1": 0.1,
     "Warmup": 5000,
     "Batch size": batch_size,
     "Mean params": sum(p.numel() for p in Mean.parameters()),
@@ -176,16 +176,17 @@ while True:
     D_loss = backward_discriminator_loss(D, fake_imgs, real_imgs, mean, stdev, mask, GP_gamma)
     optimizer_D.step()
 
-    grid = torch.cat([
-        real_imgs[:32, 0:1],
-        stdev[:32, 0:1],
-        mean[:32, 0:1],
-        fake_imgs[:32, 0:1],
-    ], 0)
-    # grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
-    grid = color_images(grid)
-    grid = torchvision.utils.make_grid(grid, nrow=32)
-    writer.add_image("Images", grid, step)
+    if step % 10 == 0:
+        grid = torch.cat([
+            real_imgs[:32, 0:1],
+            stdev[:32, 0:1],
+            mean[:32, 0:1],
+            fake_imgs[:32, 0:1],
+        ], 0)
+        grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+        grid = color_images(grid)
+        grid = torchvision.utils.make_grid(grid, nrow=32)
+        writer.add_image("Images", grid, step)
 
     print(f"Step {step}: D Loss: {D_loss:.05}, G Loss: {G_loss.item():.05}")
 

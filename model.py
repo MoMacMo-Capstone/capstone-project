@@ -160,7 +160,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.convs = nn.Sequential(
-            nn.Conv2d(5, latent_dim, 1, bias=False),
+            nn.Conv2d(4, latent_dim, 1, bias=False),
             UNET(latent_dim, resolution),
         )
         self.linear = nn.Linear(latent_dim, 1)

@@ -72,15 +72,16 @@ while step < hparams["Steps"]:
     writer.add_scalar("Loss/Mean loss", Mean_Loss, step)
     writer.add_scalar("Loss/Stdev loss", Stdev_Loss, step)
 
-    grid = torch.cat([
-        real_imgs[:32, 0:1],
-        stdev[:32, 0:1],
-        mean[:32, 0:1],
-    ], 0)
-    # grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
-    grid = color_images(grid)
-    grid = torchvision.utils.make_grid(grid, nrow=32)
-    writer.add_image("Images", grid, step)
+    if step % 10 == 0:
+        grid = torch.cat([
+            real_imgs[:32, 0:1],
+            stdev[:32, 0:1],
+            mean[:32, 0:1],
+        ], 0)
+        grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
+        grid = color_images(grid)
+        grid = torchvision.utils.make_grid(grid, nrow=32)
+        writer.add_image("Images", grid, step)
 
     print(f"Step {step}: Mean Loss: {Mean_Loss.item():.05}, Stdev Loss: {Stdev_Loss.item():.05}")
 
