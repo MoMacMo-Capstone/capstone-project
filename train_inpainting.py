@@ -104,15 +104,17 @@ hparams = {
     "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
-checkpoint = "trained_64x64_305ee13_div1.ckpt"
+# checkpoint = "m_std_128x128_32c_10000.ckpt"
+checkpoint = "inpainting_128x128_24c_3000.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
     Mean.load_state_dict(checkpoint["mean"])
     Stdev.load_state_dict(checkpoint["stdev"])
-    # if "generator" in checkpoint and "discriminator" in checkpoint:
-        # G.load_state_dict(checkpoint["generator"])
-        # D.load_state_dict(checkpoint["discriminator"])
+    if "generator" in checkpoint and "discriminator" in checkpoint:
+        G.load_state_dict(checkpoint["generator"])
+        D.load_state_dict(checkpoint["discriminator"])
+        step = checkpoint["step"]
 
 for name, value in hparams.items():
     writer.add_scalar(f"hparams/{name}", value, 0)
@@ -190,7 +192,7 @@ while True:
 
     print(f"Step {step}: D Loss: {D_loss:.05}, G Loss: {G_loss.item():.05}")
 
-    if step % 200 == 0:
+    if step % 100 == 0:
         fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
         fid_metric.reset()
         fid_metric.merge_state(fid_metric_acc)
@@ -204,4 +206,4 @@ while True:
             "generator": G.state_dict(),
             "discriminator": D.state_dict(),
             "step": step,
-        }, f"inpainting_{resolution[0]}x{resolution[1]}_{mean_stdev_latent_dim}c_{step}.ckpt")
+        }, f"inpainting_{resolution[0]}x{resolution[1]}_{latent_dim}c_{step}.ckpt")
