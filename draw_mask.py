@@ -98,3 +98,36 @@ def make_drawn_mask_3d(volume):
     mask_2d = drawer.get_mask()
     mask_3d = np.repeat(mask_2d[:, :, np.newaxis], volume.shape[2], axis=2)
     return mask_3d
+
+
+'''
+def infill_and_display(model, masked_volume, mask):
+    model.eval()
+    infilled_volume = masked_volume.copy()
+
+    with torch.no_grad():
+        for i in range(masked_volume.shape[2]):
+            slice_input = masked_volume[:, :, i]
+            slice_mask = mask[:, :, i]
+
+            input_tensor = torch.tensor(slice_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            mask_tensor = torch.tensor(slice_mask, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+
+            # Resize to 64x64
+            input_resized = nn.functional.interpolate(input_tensor, size=(64, 64), mode='bilinear', align_corners=False)
+            mask_resized = nn.functional.interpolate(mask_tensor.float(), size=(64, 64), mode='nearest').bool()
+
+            stdev_val = torch.std(input_resized[mask_resized == 0]) if (mask_resized == 0).any() else torch.tensor(1.0)
+            stdev_tensor = torch.full_like(input_resized, stdev_val)
+
+            # Infill using resized data
+            output = model(input_resized, stdev_tensor, mask_resized).squeeze(0).cpu()
+
+            # Resize output back to original resolution
+            output_resized = nn.functional.interpolate(output.unsqueeze(0), size=input_tensor.shape[-2:], mode='bilinear', align_corners=False).squeeze().numpy()
+
+            # Infill only masked region
+            infilled_volume[:, :, i][slice_mask] = output_resized[slice_mask]
+    
+    draw_mask.show_volume_with_slider(volume, mask, infilled_volume)
+'''
