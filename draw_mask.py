@@ -10,6 +10,21 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import LassoSelector, Slider    # drawing
 from matplotlib.path import Path                # drawing
 
+def rms_norm(image):
+    return np.sqrt(np.mean(np.square(image), axis=(0, 1), keepdims=True)) + 1e-9
+
+def rms_normalize(image):
+    return image / rms_norm(image)
+
+def color_images(image):
+    norm_image = rms_normalize(image) * 1
+    stacked = np.stack([
+        norm_image,
+        np.abs(norm_image) - 1,
+        -norm_image
+    ], axis=2)
+    return np.clip(stacked, 0, 1)
+
 def choose_volume(data):
     print(f"Available volumes: 0 to {data.shape[0]-1}")
     while True:
@@ -23,14 +38,15 @@ def choose_volume(data):
             print("Please enter a valid integer.")
 
 def apply_mask(volume):
-    mask = make_drawn_mask_3d(volume)
+    mask = make_drawn_mask_2d(volume)
     masked_volume = volume.copy()
     masked_volume[mask] = 0  # apply mask
     return masked_volume, mask
 
-def show_volume_with_slider(masked_volume, mask_volume, infilled_volume):
+def show_volume_with_slider(masked_volume, mask, infilled_volume):
     """
     Displays 3 volumes side-by-side using a slider to scroll through slices.
+    The infill image is colorized using `color_images`.
     """
     num_slices = masked_volume.shape[2]
     slice_idx = num_slices // 2
@@ -38,11 +54,16 @@ def show_volume_with_slider(masked_volume, mask_volume, infilled_volume):
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     plt.subplots_adjust(bottom=0.2)
 
-    titles = ["Image", "Mask", "Infill"]
+    # Initial colorized infill
+    initial_infill_slice = infilled_volume[:, :, slice_idx]
+    color_infill = color_images(initial_infill_slice)  # shape [H, W, 3]
+    color_image = color_images(masked_volume[:, :, slice_idx])
+
+    titles = ["Image", "Mask", "Infill (Colorized)"]
     imgs = [
-        axes[0].imshow(masked_volume[:, :, slice_idx], cmap='gray'),
-        axes[1].imshow(mask_volume[:, :, slice_idx], cmap='gray'),
-        axes[2].imshow(infilled_volume[:, :, slice_idx], cmap='gray')
+        axes[0].imshow(color_image),
+        axes[1].imshow(mask, cmap='gray'),
+        axes[2].imshow(color_infill)
     ]
 
     for ax, title in zip(axes, titles):
@@ -54,9 +75,19 @@ def show_volume_with_slider(masked_volume, mask_volume, infilled_volume):
 
     def update(val):
         idx = int(slider.val)
-        imgs[0].set_data(masked_volume[:, :, idx])
-        imgs[1].set_data(mask_volume[:, :, idx])
-        imgs[2].set_data(infilled_volume[:, :, idx])
+
+        # Update grayscale masked image and mask
+        imgs[1].set_data(mask)
+        color_image = color_images(masked_volume[:, :, slice_idx])
+
+        # Recolor infill slice
+        infill_slice = infilled_volume[:, :, idx]
+        masked_slice = masked_volume[:, :, idx]
+        color_infill = color_images(infill_slice)
+        color_image = color_images(masked_slice)
+        imgs[2].set_data(color_infill)
+        imgs[0].set_data(color_image)
+
         for i, ax in enumerate(axes):
             ax.set_title(f"{titles[i]} - Slice {idx}")
         fig.canvas.draw_idle()
@@ -66,10 +97,14 @@ def show_volume_with_slider(masked_volume, mask_volume, infilled_volume):
 
 class MaskDrawer:
     def __init__(self, slice_2d):
+        # Colorize the input slice for visualization
+        color_slice = color_images(slice_2d)  # [H, W, 3]
+        self.color_slice = color_slice
         self.slice = slice_2d
         self.mask = np.zeros_like(slice_2d, dtype=bool)
+
         self.fig, self.ax = plt.subplots()
-        self.canvas = self.ax.imshow(slice_2d, cmap='gray')
+        self.canvas = self.ax.imshow(color_slice)
         self.lasso = LassoSelector(self.ax, onselect=self.on_select)
         self.finished = False
 
@@ -79,15 +114,20 @@ class MaskDrawer:
     def on_select(self, verts):
         path = Path(verts)
         y, x = np.meshgrid(np.arange(self.slice.shape[1]), np.arange(self.slice.shape[0]))
-        coords = np.vstack((y.ravel(), x.ravel())).T  # (col, row) order
+        coords = np.vstack((y.ravel(), x.ravel())).T
         self.mask = path.contains_points(coords).reshape(self.slice.shape)
-        self.canvas.set_data(np.where(self.mask, 1.0, self.slice))
+
+        # Visual feedback: blend color with white in masked areas
+        masked_color = self.color_slice.copy()
+        masked_color[self.mask] = [1.0, 1.0, 1.0]  # white mask feedback
+
+        self.canvas.set_data(masked_color)
         self.fig.canvas.draw_idle()
 
     def get_mask(self):
         return self.mask
 
-def make_drawn_mask_3d(volume):
+def make_drawn_mask_2d(volume):
     """
     Opens a UI for the user to draw a mask on one slice,
     then applies the mask across all slices.
@@ -96,38 +136,5 @@ def make_drawn_mask_3d(volume):
     slice_2d = volume[:, :, middle_idx]
     drawer = MaskDrawer(slice_2d)
     mask_2d = drawer.get_mask()
-    mask_3d = np.repeat(mask_2d[:, :, np.newaxis], volume.shape[2], axis=2)
-    return mask_3d
-
-
-'''
-def infill_and_display(model, masked_volume, mask):
-    model.eval()
-    infilled_volume = masked_volume.copy()
-
-    with torch.no_grad():
-        for i in range(masked_volume.shape[2]):
-            slice_input = masked_volume[:, :, i]
-            slice_mask = mask[:, :, i]
-
-            input_tensor = torch.tensor(slice_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-            mask_tensor = torch.tensor(slice_mask, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
-
-            # Resize to 64x64
-            input_resized = nn.functional.interpolate(input_tensor, size=(64, 64), mode='bilinear', align_corners=False)
-            mask_resized = nn.functional.interpolate(mask_tensor.float(), size=(64, 64), mode='nearest').bool()
-
-            stdev_val = torch.std(input_resized[mask_resized == 0]) if (mask_resized == 0).any() else torch.tensor(1.0)
-            stdev_tensor = torch.full_like(input_resized, stdev_val)
-
-            # Infill using resized data
-            output = model(input_resized, stdev_tensor, mask_resized).squeeze(0).cpu()
-
-            # Resize output back to original resolution
-            output_resized = nn.functional.interpolate(output.unsqueeze(0), size=input_tensor.shape[-2:], mode='bilinear', align_corners=False).squeeze().numpy()
-
-            # Infill only masked region
-            infilled_volume[:, :, i][slice_mask] = output_resized[slice_mask]
-    
-    draw_mask.show_volume_with_slider(volume, mask, infilled_volume)
-'''
+    #mask_3d = np.repeat(mask_2d[:, :, np.newaxis], volume.shape[2], axis=2)
+    return mask_2d

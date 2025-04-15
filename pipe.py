@@ -7,91 +7,177 @@ import torchvision
 # from torchvision import datasets, transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-import lama_mask
-#import read_seismic_data
-from model import *
-
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import LassoSelector    # drawing
 from matplotlib.path import Path                # drawing
+# import lama_mask
 import draw_mask
 
-def zero_centered_gradient_penalty(Samples, Critics):
-    Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
-    return Gradient.square().sum([1, 2, 3]).mean()
+def fft(image):
+    ffted = torch.fft.fft2(image)
+    return torch.cat([ffted.real, ffted.imag], dim=1)
 
-def generator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask):
-    fake_logits = discriminator(fake_noise, mean, stdev, mask)
-    real_logits = discriminator(real_noise, mean, stdev, mask).detach()
+def ifft(image):
+    channels = image.shape[1] // 2
+    real = image[:, :channels]
+    imag = image[:, channels:]
+    complex_tensor = torch.complex(real, imag)
+    return torch.fft.ifft2(complex_tensor).real  # Only return the real part
 
-    relativistic_logits = fake_logits - real_logits
-    adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
+def leaky_relu(z):
+    return nn.functional.leaky_relu(z, 0.2)
 
-    writer.add_scalar("Loss/Generator Loss", adversarial_loss.item(), step)
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels * 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 2, channels * 2, 3, groups=max(channels // 8, 1), padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(channels * 2, channels, 1, bias=False),
+        )
 
-    return adversarial_loss
+    def forward(self, z):
+        return z + self.block(z)
 
-def backward_discriminator_loss(discriminator, fake_noise, real_noise, mean, stdev, mask, gamma):
-    fake_noise = fake_noise.detach().requires_grad_(True)
-    real_noise = real_noise.detach().requires_grad_(True)
+def extract_patches(x, patch_size):
+    """
+    Extract non-overlapping patches from x.
 
-    fake_logits = discriminator(fake_noise, mean, stdev, mask)
-    real_logits = discriminator(real_noise, mean, stdev, mask)
+    Args:
+        x (Tensor): Input tensor of shape (B, C, H, W)
+        patch_size (int): Size of each (square) patch.
 
-    relativistic_logits = real_logits - fake_logits
-    adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
-    adversarial_loss.backward(retain_graph=True)
+    Returns:
+        Tensor: Extracted patches with shape 
+                (B, C * patch_size * patch_size, H // patch_size, W // patch_size)
+    """
 
-    r1_penalty = zero_centered_gradient_penalty(real_noise, real_logits)
-    (r1_penalty * (gamma / 2)).backward()
-    r2_penalty = zero_centered_gradient_penalty(fake_noise, fake_logits)
-    (r2_penalty * (gamma / 2)).backward()
+    if type(patch_size) == type(0):
+        patch_size = (patch_size, patch_size)
 
-    writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), step)
-    writer.add_scalar("Loss/R1 Penalty", r1_penalty.item(), step)
-    writer.add_scalar("Loss/R2 Penalty", r2_penalty.item(), step)
+    # Create an unfold module with kernel_size and stride equal to patch_size.
+    unfold = nn.Unfold(kernel_size=patch_size, stride=patch_size)
+    
+    # Unfold the input; shape becomes (B, C * patch_size * patch_size, L)
+    # where L = (H // patch_size) * (W // patch_size)
+    patches = unfold(x)
+    
+    # Reshape to (B, C * patch_size * patch_size, H // patch_size, W // patch_size)
+    H_patches = x.shape[2] // patch_size[0]
+    W_patches = x.shape[3] // patch_size[1]
+    patches = patches.view(x.shape[0], -1, H_patches, W_patches)
+    
+    return patches
 
-    discriminator_loss = adversarial_loss.item() + (gamma / 2) * (r1_penalty.item() + r2_penalty.item())
-    return discriminator_loss
+def reconstruct_from_patches(patches, patch_size):
+    """
+    Reconstruct the original image from its patches.
 
-def prepare_for_fid(imgs):
-    imgs = imgs[:, 0:1]
-    return (color_images(imgs) * 128).clamp(0, 255).to(torch.uint8)
+    Args:
+        patches (Tensor): Tensor of shape (B, C * patch_size * patch_size, H_patches, W_patches)
+        patch_size (int): The same patch size used for extraction.
 
-def interpolate(x, x0, x1, y0, y1):
-    if x <= x0:
-        return y0
-    elif x >= x1:
-        return y1
+    Returns:
+        Tensor: Reconstructed image of shape (B, C, H_patches * patch_size, W_patches * patch_size)
+    """
+    if type(patch_size) == type(0):
+        patch_size = (patch_size, patch_size)
 
-    return (x - x0) * (y1 - y0) / (x1 - x0) + y0
+    B, patch_dim, H_patches, W_patches = patches.shape
+    # Reshape patches to (B, patch_dim, L) with L = H_patches * W_patches.
+    patches = patches.view(B, patch_dim, -1)
+    
+    # Define output size
+    output_size = (H_patches * patch_size[0], W_patches * patch_size[1])
+    
+    # Create a fold module matching the patch parameters.
+    fold = nn.Fold(output_size=output_size, kernel_size=patch_size, stride=patch_size)
+    
+    # For non-overlapping patches, each pixel is covered exactly once, so fold directly recovers the image.
+    reconstructed = fold(patches)
+    
+    return reconstructed
 
-def interpolate_exponential(x, x0, x1, y0, y1):
-    if x <= x0:
-        return y0
-    elif x >= x1:
-        return y1
+class FFPatches(nn.Module):
+    def __init__(self, channels, n_patches):
+        super(FFPatches, self).__init__()
+        self.n_patches = n_patches
 
-    return y0 * (y1 / y0) ** ((x - x0) / (x1 - x0))
+        total_patches = n_patches[0] * n_patches[1]
 
-Mean = MeanEstimator().to(device)
-Stdev = VarEstimator().to(device)
-G = Generator().to(device)
-D = Discriminator().to(device)
+        inner_channels = 2 * channels * total_patches
+
+        self.block = nn.Sequential(
+            nn.Conv2d(inner_channels, inner_channels * 2, 1, groups=total_patches),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(inner_channels * 2, inner_channels * 2, 3, groups=max(inner_channels // 8, 1), padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(inner_channels * 2, inner_channels, 1, groups=total_patches, bias=False),
+        )
+
+    def forward(self, z):
+        orig = z
+
+        z = extract_patches(z, self.n_patches)
+        z = fft(z)
+        z = self.block(z)
+        z = ifft(z)
+        z = reconstruct_from_patches(z, self.n_patches)
+
+        z = match_shape(z, orig) # fft reshape
+        z = orig + z
+        orig_max = orig.amax(2, keepdim=True).amax(3, keepdim=True)
+        orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
+        z = z.clamp(orig_min, orig_max)
+
+        return z
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim):
+        super(Generator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(4, latent_dim, 1, bias=False),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (1, 1)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (2, 2)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (4, 4)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (8, 1)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (1, 8)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (4, 4)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (2, 2)),
+            ResidualBlock(latent_dim),
+            FFPatches(latent_dim, (1, 1)),
+            ResidualBlock(latent_dim),
+            nn.Conv2d(latent_dim, 1, 1, bias=False),
+        )
+
+    def forward(self, original, mask):
+        original = original.masked_fill(mask, 0)
+        noise = torch.randn_like(original)
+        fft_noise = ifft(torch.randn_like(fft(original)))
+        inpainted = self.model(torch.cat([original, mask, noise, fft_noise], dim = 1))
+        return torch.where(mask, inpainted, original)
 
 resolution = (64, 64)
-latent_dim = 64
-mean_stdev_latent_dim = 64
 batch_size = 256
+latent_dim = 8
 epoch = 0
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator().to(device)
-D = Discriminator().to(device)
+G = Generator(latent_dim).to(device)
+#D = Discriminator(latent_dim).to(device)
 
 '''
 hparams = {
@@ -121,71 +207,118 @@ if checkpoint:
     print(f"Checkpoint loaded successfully at epoch {epoch}.")
 '''
 
+def center_of_mass_and_rectangle(mask, rect_size):
+    """
+    Given a 2D binary NumPy array 'mask' and a rectangle size (width, height),
+    this function computes the center of mass of the 'mask' and returns the
+    edge coordinates (top, left, bottom, right) of a rectangle of the given size 
+    centered at that location.
+
+    Parameters:
+    - mask (np.ndarray): 2D binary numpy array.
+    - rect_size (tuple): (width, height) of the desired rectangle.
+
+    Returns:
+    - tuple: (top, left, bottom, right) edge coordinates of the rectangle.
+             The coordinates are integers.
+    """
+    if mask.ndim != 2:
+        raise ValueError("Input mask must be a 2D array.")
+        
+    height, width = mask.shape
+    rect_width, rect_height = rect_size
+    
+    # Get indices where mask is non-zero (assuming binary mask with 1s marking the region of interest)
+    indices = np.argwhere(mask)
+    if indices.size == 0:
+        raise ValueError("The mask does not contain any nonzero elements.")
+        
+    # Calculate the center of mass.
+    # axis 0 corresponds to row (y-coordinate) and axis 1 corresponds to column (x-coordinate)
+    center_y, center_x = np.mean(indices, axis=0)
+    
+    # Convert center coordinates to integers (rounding to nearest integer)
+    center_x = int(round(center_x))
+    center_y = int(round(center_y))
+    
+    # Compute half sizes.
+    half_width = rect_width // 2
+    half_height = rect_height // 2
+    
+    # Calculate the rectangle edges.
+    # For even dimensions, the rectangle will be slightly off center if strict symmetry is required.
+    left = max(center_x - half_width, 0)
+    right = min(center_x + half_width + (rect_width % 2), width)  # Adjust for odd widths.
+    top = max(center_y - half_height, 0)
+    bottom = min(center_y + half_height + (rect_height % 2), height)  # Adjust for odd heights.
+    
+    # If the rectangle exceeds the boundary, adjust to fit within the mask:
+    if right - left < rect_width:
+        # Adjust horizontally if needed.
+        if left == 0:
+            right = min(rect_width, width)
+        elif right == width:
+            left = max(width - rect_width, 0)
+    
+    if bottom - top < rect_height:
+        # Adjust vertically if needed.
+        if top == 0:
+            bottom = min(rect_height, height)
+        elif bottom == height:
+            top = max(height - rect_height, 0)
+    
+    return (top, left, bottom, right)
+
 def load_checkpoint():
 
-    checkpoint = input("Enter the path to the checkpoint file: ").strip()
+    checkpoint = "trained_64x64_efa9a33_div8.ckpt" #input("Enter the path to the checkpoint file: ").strip()
     if checkpoint:
         checkpoint = torch.load(checkpoint, map_location=torch.device('cpu'))
-        Mean.load_state_dict(checkpoint["mean"])
-        Stdev.load_state_dict(checkpoint["stdev"])
-        if "generator" in checkpoint and "discriminator" in checkpoint:
-            G.load_state_dict(checkpoint["generator"])
-            D.load_state_dict(checkpoint["discriminator"])
-            step = checkpoint["step"]
+        G.load_state_dict(checkpoint["generator"])
+        #D.load_state_dict(checkpoint["discriminator"])
+        epoch = checkpoint["epoch"]
+        print(f"Checkpoint loaded successfully at epoch {epoch}.")
         return checkpoint
-    
-'''
-def infill_and_display(model, masked_volume, mask):
-    model.eval()
-    infilled_volume = masked_volume.copy()
 
-    with torch.no_grad():
-        for i in range(masked_volume.shape[2]):
-            slice_input = masked_volume[:, :, i]
-            slice_mask = mask[:, :, i]
-
-            input_tensor = torch.tensor(slice_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-            mask_tensor = torch.tensor(slice_mask, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
-            #stdev = torch.std(mask_tensor).item() if mask_tensor.numel() > 0 else 1.0
-
-            stdev_val = torch.std(input_tensor[mask_tensor == 0]) if (mask_tensor == 0).any() else torch.tensor(1.0)
-            stdev_tensor = torch.full_like(input_tensor, stdev_val)
-            output = model(input_tensor, stdev_tensor, mask_tensor).squeeze().cpu().numpy()
-            #output = model(input_tensor, stdev, mask_tensor).squeeze().cpu().numpy()
-            infilled_volume[:, :, i][slice_mask] = output[slice_mask]
-    
-    draw_mask.show_volume_with_slider(volume, mask, infilled_volume)
-'''    
+def match_shape(tensor, target):
+    # Pad or crop tensor to match the target shape
+    _, _, h, w = tensor.shape
+    _, _, H, W = target.shape
+    dh, dw = H - h, W - w
+    if dh > 0 or dw > 0:
+        tensor = nn.functional.pad(tensor, [0, dw, 0, dh])
+    elif dh < 0 or dw < 0:
+        tensor = tensor[:, :, :H, :W]
+    return tensor
 
 def infill_and_display(model, masked_volume, mask):
     model.eval()
     infilled_volume = masked_volume.copy()
+    rect_size = (64, 64)  # (width, height)
+    top, left, bottom, right = center_of_mass_and_rectangle(mask, rect_size)
 
     with torch.no_grad():
         for i in range(masked_volume.shape[2]):
             slice_input = masked_volume[:, :, i]
-            slice_mask = mask[:, :, i]
+            #slice_mask = mask[:, :, i]
 
-            input_tensor = torch.tensor(slice_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-            mask_tensor = torch.tensor(slice_mask, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+            if not np.any(mask):
+                continue  # Skip if no masked region
 
-            # Resize to 64x64
-            input_resized = nn.functional.interpolate(input_tensor, size=(64, 64), mode='bilinear', align_corners=False)
-            mask_resized = nn.functional.interpolate(mask_tensor.float(), size=(64, 64), mode='nearest').bool()
+            cropped_input = slice_input[top:bottom, left:right]
+            cropped_mask = mask[top:bottom, left:right]
 
-            stdev_val = torch.std(input_resized[mask_resized == 0]) if (mask_resized == 0).any() else torch.tensor(1.0)
-            stdev_tensor = torch.full_like(input_resized, stdev_val)
+            # Convert to tensors
+            input_tensor = torch.tensor(cropped_input, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            mask_tensor = torch.tensor(cropped_mask, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
 
-            # Infill using resized data
-            output = model(input_resized, stdev_tensor, mask_resized).squeeze(0).cpu()
-
-            # Resize output back to original resolution
-            output_resized = nn.functional.interpolate(output.unsqueeze(0), size=input_tensor.shape[-2:], mode='bilinear', align_corners=False).squeeze().numpy()
+            # Run model
+            output = model(input_tensor, mask_tensor).squeeze().numpy()
 
             # Infill only masked region
-            infilled_volume[:, :, i][slice_mask] = output_resized[slice_mask]
-    
-    draw_mask.show_volume_with_slider(volume, mask, infilled_volume)
+            infilled_volume[top:bottom, left:right, i][cropped_mask] = output[cropped_mask]
+
+    draw_mask.show_volume_with_slider(masked_volume, mask, infilled_volume)
 
 if __name__ == "__main__":
     checkpoint = load_checkpoint()
