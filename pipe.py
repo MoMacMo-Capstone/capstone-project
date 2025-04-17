@@ -14,169 +14,164 @@ from matplotlib.widgets import LassoSelector    # drawing
 from matplotlib.path import Path                # drawing
 # import lama_mask
 import draw_mask
+from model import CombinedGenerator
 
-def fft(image):
-    ffted = torch.fft.fft2(image)
-    return torch.cat([ffted.real, ffted.imag], dim=1)
-
-def ifft(image):
-    channels = image.shape[1] // 2
-    real = image[:, :channels]
-    imag = image[:, channels:]
-    complex_tensor = torch.complex(real, imag)
-    return torch.fft.ifft2(complex_tensor).real  # Only return the real part
+def pink_noise(shape):
+    y = torch.fft.fftfreq(shape[2], device=device).view((1, 1, -1, 1))
+    x = torch.fft.fftfreq(shape[3], device=device).view((1, 1, 1, -1))
+    radial_frequency = torch.sqrt(x * x + y * y)
+    noise = torch.rand(*shape, device=device)
+    noise = torch.fft.fft2(noise)
+    noise /= radial_frequency
+    noise[:, :, 0, 0] = 0
+    return torch.fft.ifft2(noise).abs()
 
 def leaky_relu(z):
     return nn.functional.leaky_relu(z, 0.2)
 
-class ResidualBlock(nn.Module):
+# def noise_to_inpainting(noise, mean, stdev, mask):
+    # inpainting = noise * stdev + mean
+    # return torch.where(mask, inpainting, mean)
+
+# def inpainting_to_noise(image, mean, stdev, mask):
+    # noise = ((image - mean) / stdev).clamp(-3, 3)
+    # return noise.masked_fill(~mask, 0)
+
+def abs_norm(images):
+    return images.abs().amax(2, keepdim=True).amax(3, keepdim=True) + 1e-9
+
+def abs_normalize(images):
+    return images / abs_norm(images)
+
+def color_images(images):
+    images = abs_normalize(images) * 2
+    return torch.cat([images, images.abs() - 1, -images], dim=1).clamp(0, 1)
+
+class AOTBlock(nn.Module):
     def __init__(self, channels):
-        super(ResidualBlock, self).__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(channels, channels * 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(channels * 2, channels * 2, 3, groups=max(channels // 8, 1), padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(channels * 2, channels, 1, bias=False),
-        )
-
-    def forward(self, z):
-        return z + self.block(z)
-
-def extract_patches(x, patch_size):
-    """
-    Extract non-overlapping patches from x.
-
-    Args:
-        x (Tensor): Input tensor of shape (B, C, H, W)
-        patch_size (int): Size of each (square) patch.
-
-    Returns:
-        Tensor: Extracted patches with shape 
-                (B, C * patch_size * patch_size, H // patch_size, W // patch_size)
-    """
-
-    if type(patch_size) == type(0):
-        patch_size = (patch_size, patch_size)
-
-    # Create an unfold module with kernel_size and stride equal to patch_size.
-    unfold = nn.Unfold(kernel_size=patch_size, stride=patch_size)
-    
-    # Unfold the input; shape becomes (B, C * patch_size * patch_size, L)
-    # where L = (H // patch_size) * (W // patch_size)
-    patches = unfold(x)
-    
-    # Reshape to (B, C * patch_size * patch_size, H // patch_size, W // patch_size)
-    H_patches = x.shape[2] // patch_size[0]
-    W_patches = x.shape[3] // patch_size[1]
-    patches = patches.view(x.shape[0], -1, H_patches, W_patches)
-    
-    return patches
-
-def reconstruct_from_patches(patches, patch_size):
-    """
-    Reconstruct the original image from its patches.
-
-    Args:
-        patches (Tensor): Tensor of shape (B, C * patch_size * patch_size, H_patches, W_patches)
-        patch_size (int): The same patch size used for extraction.
-
-    Returns:
-        Tensor: Reconstructed image of shape (B, C, H_patches * patch_size, W_patches * patch_size)
-    """
-    if type(patch_size) == type(0):
-        patch_size = (patch_size, patch_size)
-
-    B, patch_dim, H_patches, W_patches = patches.shape
-    # Reshape patches to (B, patch_dim, L) with L = H_patches * W_patches.
-    patches = patches.view(B, patch_dim, -1)
-    
-    # Define output size
-    output_size = (H_patches * patch_size[0], W_patches * patch_size[1])
-    
-    # Create a fold module matching the patch parameters.
-    fold = nn.Fold(output_size=output_size, kernel_size=patch_size, stride=patch_size)
-    
-    # For non-overlapping patches, each pixel is covered exactly once, so fold directly recovers the image.
-    reconstructed = fold(patches)
-    
-    return reconstructed
-
-class FFPatches(nn.Module):
-    def __init__(self, channels, n_patches):
-        super(FFPatches, self).__init__()
-        self.n_patches = n_patches
-
-        total_patches = n_patches[0] * n_patches[1]
-
-        inner_channels = 2 * channels * total_patches
-
-        self.block = nn.Sequential(
-            nn.Conv2d(inner_channels, inner_channels * 2, 1, groups=total_patches),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(inner_channels * 2, inner_channels * 2, 3, groups=max(inner_channels // 8, 1), padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(inner_channels * 2, inner_channels, 1, groups=total_patches, bias=False),
-        )
+        super(AOTBlock, self).__init__()
+        self.l1_d1 = nn.Conv2d(channels, channels // 4, 3, dilation=1, padding=1)
+        self.l1_d2 = nn.Conv2d(channels, channels // 4, 3, dilation=2, padding=2)
+        self.l1_d4 = nn.Conv2d(channels, channels // 4, 3, dilation=4, padding=4)
+        self.l1_d8 = nn.Conv2d(channels, channels // 4, 3, dilation=8, padding=8)
+        self.l2 = nn.Conv2d(channels, channels, 3, padding=1)
 
     def forward(self, z):
         orig = z
+        z = torch.cat([l(z) for l in [self.l1_d1, self.l1_d2, self.l1_d4, self.l1_d8]], dim=1)
+        z = leaky_relu(z)
+        z = self.l2(z)
+        return z + orig
 
-        z = extract_patches(z, self.n_patches)
-        z = fft(z)
-        z = self.block(z)
-        z = ifft(z)
-        z = reconstruct_from_patches(z, self.n_patches)
+class UNET(nn.Module):
+    def __init__(self, channels, resolution, inject_noise=False):
+        super(UNET, self).__init__()
+        self.block1 = nn.Sequential(
+            AOTBlock(channels),
+            AOTBlock(channels),
+        )
+        self.block2 = nn.Sequential(
+            AOTBlock(channels),
+            AOTBlock(channels),
+        )
 
-        z = match_shape(z, orig) # fft reshape
-        z = orig + z
-        orig_max = orig.amax(2, keepdim=True).amax(3, keepdim=True)
-        orig_min = orig.amin(2, keepdim=True).amin(3, keepdim=True)
-        z = z.clamp(orig_min, orig_max)
+        if inject_noise:
+            self.noise_injector = nn.Conv2d(channels, channels, 1, bias=False)
+        else:
+            self.noise_injector = None
+
+        if min(resolution[0], resolution[1]) > 16:
+            self.downscale = nn.Conv2d(channels, channels * 2, 3, padding=1, bias=False)
+            self.inner = UNET(channels * 2, (resolution[0] // 2, resolution[1] // 2), inject_noise)
+            self.upscale = nn.Conv2d(channels * 2, channels, 3, padding=1, bias=False)
+        else:
+            self.downscale = None
+            self.inner = None
+            self.upscale = None
+
+    def forward(self, z):
+        if self.noise_injector != None:
+            noise = self.noise_injector(pink_noise(z.shape))
+            z = z + noise
+
+        z = self.block1(z)
+
+        if self.downscale != None and self.inner != None and self.upscale != None:
+            orig = z
+
+            z = self.downscale(z)
+            z = nn.functional.interpolate(z, scale_factor=0.5, mode="bilinear")
+            z = self.inner(z)
+            z = nn.functional.interpolate(z, size=orig.shape[2:], mode="bilinear")
+            z = self.upscale(z)
+
+            z = z + orig
+
+        z = self.block2(z)
 
         return z
 
-class Generator(nn.Module):
-    def __init__(self, latent_dim):
-        super(Generator, self).__init__()
+class MeanEstimator(nn.Module):
+    def __init__(self):
+        super(MeanEstimator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(4, latent_dim, 1, bias=False),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (1, 1)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (2, 2)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (4, 4)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (8, 1)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (1, 8)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (4, 4)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (2, 2)),
-            ResidualBlock(latent_dim),
-            FFPatches(latent_dim, (1, 1)),
-            ResidualBlock(latent_dim),
-            nn.Conv2d(latent_dim, 1, 1, bias=False),
+            nn.Conv2d(2, mean_stdev_latent_dim, 1, bias=False),
+            UNET(mean_stdev_latent_dim, resolution),
+            nn.Conv2d(mean_stdev_latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, original, mask):
         original = original.masked_fill(mask, 0)
-        noise = torch.randn_like(original)
-        fft_noise = ifft(torch.randn_like(fft(original)))
-        inpainted = self.model(torch.cat([original, mask, noise, fft_noise], dim = 1))
+        norm = abs_norm(original)
+
+        inpainted = self.model(torch.cat([original / norm, mask], dim = 1))
+        inpainted = inpainted * norm
+
         return torch.where(mask, inpainted, original)
 
-resolution = (64, 64)
-batch_size = 256
-latent_dim = 8
+class VarEstimator(nn.Module):
+    def __init__(self):
+        super(VarEstimator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(2, mean_stdev_latent_dim, 1, bias=False),
+            UNET(mean_stdev_latent_dim, resolution),
+            nn.Conv2d(mean_stdev_latent_dim, 1, 1, bias=False),
+        )
+
+    def forward(self, mean, mask):
+        norm = abs_norm(mean)
+
+        output = self.model(torch.cat([mean / norm, mask], dim = 1))
+        output = output.abs() + 1e-9
+        output = output * norm
+
+        return output.masked_fill(~mask, 0)
+
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, latent_dim, 1, bias=False),
+            UNET(latent_dim, resolution, inject_noise=True),
+            nn.Conv2d(latent_dim, 1, 1, bias=False),
+        )
+
+    def forward(self, mean, stdev, mask):
+        norm = abs_norm(mean)
+
+        inpainted = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
+
+        return torch.where(mask, inpainted, mean)
+    
+resolution = (128, 128)
+latent_dim = 24
+mean_stdev_latent_dim = 32
 epoch = 0
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-G = Generator(latent_dim).to(device)
+G = CombinedGenerator("trained_128x128_b54a594.ckpt").to(device)
 #D = Discriminator(latent_dim).to(device)
 
 '''
@@ -269,17 +264,6 @@ def center_of_mass_and_rectangle(mask, rect_size):
     
     return (top, left, bottom, right)
 
-def load_checkpoint():
-
-    checkpoint = "trained_64x64_efa9a33_div8.ckpt" #input("Enter the path to the checkpoint file: ").strip()
-    if checkpoint:
-        checkpoint = torch.load(checkpoint, map_location=torch.device('cpu'))
-        G.load_state_dict(checkpoint["generator"])
-        #D.load_state_dict(checkpoint["discriminator"])
-        epoch = checkpoint["epoch"]
-        print(f"Checkpoint loaded successfully at epoch {epoch}.")
-        return checkpoint
-
 def match_shape(tensor, target):
     # Pad or crop tensor to match the target shape
     _, _, h, w = tensor.shape
@@ -321,16 +305,14 @@ def infill_and_display(model, masked_volume, mask):
     draw_mask.show_volume_with_slider(masked_volume, mask, infilled_volume)
 
 if __name__ == "__main__":
-    checkpoint = load_checkpoint()
-    if checkpoint:
-        model = G  # Generator already loaded
+    model = G  # Generator already loaded
+        
+    with open("SegActi-45x201x201x614.bin", "rb") as f:
+        w, x, y, z = 45, 201, 201, 614
+        data = np.frombuffer(f.read(w * x * y * z * 4), dtype="f4").reshape(w, x, y, z)
 
-        with open("SegActi-45x201x201x614.bin", "rb") as f:
-            w, x, y, z = 45, 201, 201, 614
-            data = np.frombuffer(f.read(w * x * y * z * 4), dtype="f4").reshape(w, x, y, z)
-
-        volume = draw_mask.choose_volume(data)
-        masked_volume, mask = draw_mask.apply_mask(volume)
-        #print("mask applied.")
-        infill_and_display(model, masked_volume, mask)
+    volume = draw_mask.choose_volume(data)
+    masked_volume, mask = draw_mask.apply_mask(volume)
+    #print("mask applied.")
+    infill_and_display(model, masked_volume, mask)
 
