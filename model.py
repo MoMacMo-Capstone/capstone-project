@@ -152,6 +152,7 @@ class Generator(nn.Module):
         norm = abs_norm(mean)
 
         inpainted = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
+        inpainted = inpainted * norm
 
         return torch.where(mask, inpainted, mean)
 
