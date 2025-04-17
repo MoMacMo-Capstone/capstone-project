@@ -1,10 +1,3 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision
-from torchmetrics.image.fid import FrechetInceptionDistance
-
-import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import LassoSelector, Slider    # drawing
