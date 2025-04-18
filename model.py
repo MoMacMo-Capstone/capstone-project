@@ -1,9 +1,13 @@
 import torch
 import torch.nn as nn
 
-resolution = (128, 128)
-latent_dim = 24
-mean_stdev_latent_dim = 32
+# resolution = (128, 128)
+# latent_dim = 24
+# mean_stdev_latent_dim = 32
+
+resolution = (64, 64)
+latent_dim = 64
+mean_stdev_latent_dim = 64
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cpu")
