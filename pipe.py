@@ -5,11 +5,9 @@ import numpy as np
 import draw_mask
 from model import CombinedGenerator, device, resolution
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
-
 # G = CombinedGenerator("trained_128x128_b54a594.ckpt").to(device)
-G = CombinedGenerator("trained_64x64_cbbfce7_div1.ckpt").to(device)
+# G = CombinedGenerator("trained_64x64_cbbfce7_div1.ckpt").to(device)
+G = CombinedGenerator("trained_64x64_305ee13_div1.ckpt").to(device)
 
 def center_of_mass_and_rectangle(mask, rect_size):
     """
