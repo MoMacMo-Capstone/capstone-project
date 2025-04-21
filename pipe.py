@@ -82,14 +82,17 @@ def match_shape(tensor, target):
         tensor = tensor[:, :, :H, :W]
     return tensor
 
-def infill_and_display(model, masked_volume, mask):
+def infill_and_display(model, volume, mask):
     model.eval()
-    infilled_volume = masked_volume.copy()
+    infilled_volume = volume.copy()
+    noise_volume = np.zeros_like(volume)
+    mean_volume = volume.copy()
+    stdev_volume = np.zeros_like(volume)
     top, left, bottom, right = center_of_mass_and_rectangle(mask, resolution)
 
     with torch.no_grad():
-        for i in range(masked_volume.shape[2]):
-            slice_input = masked_volume[:, :, i]
+        for i in range(volume.shape[2]):
+            slice_input = volume[:, :, i]
             #slice_mask = mask[:, :, i]
 
             if not np.any(mask):
@@ -103,14 +106,21 @@ def infill_and_display(model, masked_volume, mask):
             mask_tensor = torch.tensor(cropped_mask, dtype=torch.bool, device=device).unsqueeze(0).unsqueeze(0)
 
             # Run model
-            output = model(input_tensor, mask_tensor).squeeze().cpu().numpy()
+            infill, noise, mean, stdev = model.forward_with_intermediate(input_tensor, mask_tensor)
+            infill = infill.squeeze().cpu().numpy()
+            noise = noise.squeeze().cpu().numpy()
+            mean = mean.squeeze().cpu().numpy()
+            stdev = stdev.squeeze().cpu().numpy()
 
             # Infill only masked region
-            infilled_volume[top:bottom, left:right, i][cropped_mask] = output[cropped_mask]
+            infilled_volume[top:bottom, left:right, i][cropped_mask] = infill[cropped_mask]
+            noise_volume[top:bottom, left:right, i] = noise
+            mean_volume[top:bottom, left:right, i] = mean
+            stdev_volume[top:bottom, left:right, i] = stdev
 
-            print(f"Infilled slice {i + 1} of {masked_volume.shape[2]}")
+            print(f"Infilled slice {i + 1} of {volume.shape[2]}")
 
-    draw_mask.show_volume_with_slider(masked_volume, mask, infilled_volume)
+    draw_mask.show_volume_with_slider(volume, mask, infilled_volume, noise_volume, mean_volume, stdev_volume)
 
 if __name__ == "__main__":
     model = G  # Generator already loaded
@@ -120,6 +130,6 @@ if __name__ == "__main__":
         data = np.frombuffer(f.read(w * x * y * z * 4), dtype="f4").reshape(w, x, y, z)
 
     volume = draw_mask.choose_volume(data)
-    masked_volume, mask = draw_mask.apply_mask(volume)
-    #print("mask applied.")
-    infill_and_display(model, masked_volume, mask)
+    # masked_volume, mask = draw_mask.apply_mask(volume)
+    mask = draw_mask.make_drawn_mask_2d(volume)
+    infill_and_display(model, volume, mask)

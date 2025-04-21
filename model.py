@@ -231,3 +231,9 @@ class CombinedGenerator(nn.Module):
         stdev = self.stdev_estimator(mean, mask).detach()
         noise = self.generator(mean, stdev, mask)
         return noise_to_inpainting(noise, mean, stdev, mask)
+
+    def forward_with_intermediate(self, original, mask):
+        mean = self.mean_estimator(original, mask).detach()
+        stdev = self.stdev_estimator(mean, mask).detach()
+        noise = self.generator(mean, stdev, mask)
+        return noise_to_inpainting(noise, mean, stdev, mask), noise, mean, stdev
