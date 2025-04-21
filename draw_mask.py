@@ -36,32 +36,34 @@ def apply_mask(volume):
     masked_volume[mask] = 0
     return masked_volume, mask
 
-def show_volume_with_slider(masked_volume, mask, infilled_volume, noise_volume, mean_volume, stdev_volume):
+def show_volume_with_slider(image_volume, mask, infilled_volume, noise_volume, mean_volume, stdev_volume):
     """
     Displays 3 volumes side-by-side using a slider to scroll through slices.
     The infill image is colorized using `color_images`.
     """
-    num_slices = masked_volume.shape[2]
+    num_slices = image_volume.shape[2]
     slice_idx = num_slices // 2
 
-    fig, axes = plt.subplots(1, 6, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 7, figsize=(15, 5))
     plt.subplots_adjust(bottom=0.2)
 
     # Initial colorized infill
-    color_image = color_images(masked_volume[:, :, slice_idx])
+    color_image = color_images(image_volume[:, :, slice_idx])
+    color_masked = color_images(np.where(mask, 0, image_volume[:, :, slice_idx]))
     color_infill = color_images(infilled_volume[:, :, slice_idx])
     color_noise = color_images(noise_volume[:, :, slice_idx])
     color_mean = color_images(mean_volume[:, :, slice_idx])
     color_stdev = color_images(stdev_volume[:, :, slice_idx])
 
-    titles = ["Image", "Mask", "Mean", "Standard Deviation", "Noise", "Infill"]
+    titles = ["Image", "Mask", "Masked", "Mean", "Standard Deviation", "Noise", "Infill"]
     imgs = [
         axes[0].imshow(color_image),
         axes[1].imshow(mask, cmap='gray'),
-        axes[2].imshow(color_mean),
-        axes[3].imshow(color_stdev),
-        axes[4].imshow(color_noise),
-        axes[5].imshow(color_infill),
+        axes[2].imshow(color_masked),
+        axes[3].imshow(color_mean),
+        axes[4].imshow(color_stdev),
+        axes[5].imshow(color_noise),
+        axes[6].imshow(color_infill),
     ]
 
     for ax, title in zip(axes, titles):
@@ -74,17 +76,19 @@ def show_volume_with_slider(masked_volume, mask, infilled_volume, noise_volume, 
     def update(val):
         slice_idx = int(slider.val)
 
-        color_image = color_images(masked_volume[:, :, slice_idx])
+        color_image = color_images(image_volume[:, :, slice_idx])
+        color_masked = color_images(np.where(mask, 0, image_volume[:, :, slice_idx]))
         color_infill = color_images(infilled_volume[:, :, slice_idx])
         color_noise = color_images(noise_volume[:, :, slice_idx])
         color_mean = color_images(mean_volume[:, :, slice_idx])
         color_stdev = color_images(stdev_volume[:, :, slice_idx])
 
         imgs[0].set_data(color_image)
-        imgs[2].set_data(color_mean)
-        imgs[3].set_data(color_stdev)
-        imgs[4].set_data(color_noise)
-        imgs[5].set_data(color_infill)
+        imgs[2].set_data(color_masked)
+        imgs[3].set_data(color_mean)
+        imgs[4].set_data(color_stdev)
+        imgs[5].set_data(color_noise)
+        imgs[6].set_data(color_infill)
 
         fig.canvas.draw_idle()
 
