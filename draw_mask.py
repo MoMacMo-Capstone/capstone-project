@@ -3,6 +3,12 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import LassoSelector, Slider    # drawing
 from matplotlib.path import Path                # drawing
 
+def abs_norm(image):
+    return np.max(np.abs(image), axis=(0, 1), keepdims=True) + 1e-9
+
+def abs_normalize(image):
+    return image / abs_norm(image)
+
 def rms_norm(image):
     return np.sqrt(np.mean(np.square(image), axis=(0, 1), keepdims=True)) + 1e-9
 
@@ -11,6 +17,15 @@ def rms_normalize(image):
 
 def color_images(image):
     norm_image = rms_normalize(image) * 1
+    stacked = np.stack([
+        norm_image,
+        np.abs(norm_image) - 1,
+        -norm_image
+    ], axis=2)
+    return np.clip(stacked, 0, 1)
+
+def color_images_abs(image):
+    norm_image = abs_normalize(image) * 2
     stacked = np.stack([
         norm_image,
         np.abs(norm_image) - 1,
@@ -51,9 +66,9 @@ def show_volume_with_slider(image_volume, mask, infilled_volume, noise_volume, m
     color_image = color_images(image_volume[:, :, slice_idx])
     color_masked = color_images(np.where(mask, 0, image_volume[:, :, slice_idx]))
     color_infill = color_images(infilled_volume[:, :, slice_idx])
-    color_noise = color_images(noise_volume[:, :, slice_idx])
+    color_noise = color_images_abs(noise_volume[:, :, slice_idx])
     color_mean = color_images(mean_volume[:, :, slice_idx])
-    color_stdev = color_images(stdev_volume[:, :, slice_idx])
+    color_stdev = color_images_abs(stdev_volume[:, :, slice_idx])
 
     titles = ["Image", "Mask", "Masked", "Mean", "Standard Deviation", "Noise", "Infill"]
     imgs = [
@@ -79,9 +94,9 @@ def show_volume_with_slider(image_volume, mask, infilled_volume, noise_volume, m
         color_image = color_images(image_volume[:, :, slice_idx])
         color_masked = color_images(np.where(mask, 0, image_volume[:, :, slice_idx]))
         color_infill = color_images(infilled_volume[:, :, slice_idx])
-        color_noise = color_images(noise_volume[:, :, slice_idx])
+        color_noise = color_images_abs(noise_volume[:, :, slice_idx])
         color_mean = color_images(mean_volume[:, :, slice_idx])
-        color_stdev = color_images(stdev_volume[:, :, slice_idx])
+        color_stdev = color_images_abs(stdev_volume[:, :, slice_idx])
 
         imgs[0].set_data(color_image)
         imgs[2].set_data(color_masked)
