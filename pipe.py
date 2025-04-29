@@ -10,7 +10,7 @@ import test_segy_io
 # Select the desired model checkpoint
 # G = CombinedGenerator("trained_128x128_b54a594.ckpt").to(device)
 # G = CombinedGenerator("trained_64x64_cbbfce7_div1.ckpt").to(device)
-G = CombinedGenerator("trained_64x64_305ee13_div1.ckpt", map_location=device).to(device) # Added map_location for robustness
+G = CombinedGenerator("trained_64x64_305ee13_div1.ckpt").to(device) # Added map_location for robustness
 
 def center_of_mass_and_rectangle(mask, rect_size):
     if mask.ndim != 2:
