@@ -14,7 +14,6 @@ G = CombinedGenerator("trained_64x64_305ee13_div1.ckpt").to(device) # Added map_
 
 # --- SEGY Output Configuration ---
 # (Moved from reconstruct_segy.py)
-output_dir = Path("./reconstructed") # Directory for the final SEGY
 output_segy_filename = "inpainted_direct_output.sgy" # Name for the output SEGY
 # SEGY Header Info
 client_name = "Inpainting Result (Direct)"
@@ -318,8 +317,7 @@ if __name__ == "__main__":
         print(f"Using inline_start={inline_start_val}, crossline_start={crossline_start_val} for SEGY output.")
 
         # 6. Write Output SEGY File
-        output_dir.mkdir(parents=True, exist_ok=True) # Ensure output dir exists
-        output_segy_path = output_dir / output_segy_filename
+        output_segy_path = Path(output_segy_filename)
         print(f"Writing final SEGY file to: {output_segy_path.resolve()}")
         try:
             # Use the stable revert version of test_segy_io

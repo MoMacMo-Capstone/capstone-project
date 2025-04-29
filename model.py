@@ -1,12 +1,16 @@
 import torch
 import torch.nn as nn
 
-resolution = (128, 128)
-latent_dim = 24
-mean_stdev_latent_dim = 32
+# resolution = (128, 128)
+# latent_dim = 24
+# mean_stdev_latent_dim = 32
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+resolution = (64, 64)
+latent_dim = 64
+mean_stdev_latent_dim = 64
+
+# device = torch.device("uda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 def pink_noise(shape):
     y = torch.fft.fftfreq(shape[2], device=device).view((1, 1, -1, 1))
@@ -21,13 +25,13 @@ def pink_noise(shape):
 def leaky_relu(z):
     return nn.functional.leaky_relu(z, 0.2)
 
-# def noise_to_inpainting(noise, mean, stdev, mask):
-    # inpainting = noise * stdev + mean
-    # return torch.where(mask, inpainting, mean)
+def noise_to_inpainting(noise, mean, stdev, mask):
+    inpainting = noise * stdev + mean
+    return torch.where(mask, inpainting, mean)
 
-# def inpainting_to_noise(image, mean, stdev, mask):
-    # noise = ((image - mean) / stdev).clamp(-3, 3)
-    # return noise.masked_fill(~mask, 0)
+def inpainting_to_noise(image, mean, stdev, mask):
+    noise = ((image - mean) / stdev).clamp(-3, 3)
+    return noise.masked_fill(~mask, 0)
 
 def abs_norm(images):
     return images.abs().amax(2, keepdim=True).amax(3, keepdim=True) + 1e-9
@@ -139,22 +143,21 @@ class VarEstimator(nn.Module):
 
         return output.masked_fill(~mask, 0)
 
-class Generator(nn.Module):
-    def __init__(self):
-        super(Generator, self).__init__()
-        self.model = nn.Sequential(
-            nn.Conv2d(3, latent_dim, 1, bias=False),
-            UNET(latent_dim, resolution, inject_noise=True),
-            nn.Conv2d(latent_dim, 1, 1, bias=False),
-        )
+# class Generator(nn.Module):
+    # def __init__(self):
+        # super(Generator, self).__init__()
+        # self.model = nn.Sequential(
+            # nn.Conv2d(3, latent_dim, 1, bias=False),
+            # UNET(latent_dim, resolution, inject_noise=True),
+            # nn.Conv2d(latent_dim, 1, 1, bias=False),
+        # )
 
-    def forward(self, mean, stdev, mask):
-        norm = abs_norm(mean)
+    # def forward(self, mean, stdev, mask):
+        # norm = abs_norm(mean)
 
-        inpainted = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
-        inpainted = inpainted * norm
-
-        return torch.where(mask, inpainted, mean)
+        # inpainted = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
+        # inpainted = inpainted * norm
+        # return torch.where(mask, inpainted, mean)
 
 class Discriminator(nn.Module):
     def __init__(self):
@@ -170,6 +173,43 @@ class Discriminator(nn.Module):
         z = torch.cat([img, mean, stdev, mask], dim=1)
         z = self.convs(z).mean((2, 3))
         return self.linear(z)
+
+# class CombinedGenerator(nn.Module):
+    # def __init__(self, filename=None):
+        # super(CombinedGenerator, self).__init__()
+        # self.mean_estimator = MeanEstimator()
+        # self.stdev_estimator = VarEstimator()
+        # self.generator = Generator()
+
+        # if filename:
+            # checkpoint = torch.load(filename, map_location=torch.device('cpu'))
+            # self.mean_estimator.load_state_dict(checkpoint["mean"])
+            # self.stdev_estimator.load_state_dict(checkpoint["stdev"])
+
+            # if "generator" in checkpoint:
+                # self.generator.load_state_dict(checkpoint["generator"])
+
+    # def forward(self, original, mask):
+        # with torch.no_grad():
+            # mean = self.mean_estimator(original, mask)
+            # stdev = self.stdev_estimator(mean, mask)
+        # return self.generator(mean, stdev, mask)
+
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, latent_dim, 1, bias=False),
+            UNET(latent_dim, resolution, inject_noise=True),
+            nn.Conv2d(latent_dim, 1, 1, bias=False),
+        )
+
+    def forward(self, mean, stdev, mask):
+        norm = abs_norm(mean)
+
+        noise = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
+
+        return noise.masked_fill(~mask, 0)
 
 class CombinedGenerator(nn.Module):
     def __init__(self, filename=None):
@@ -187,7 +227,13 @@ class CombinedGenerator(nn.Module):
                 self.generator.load_state_dict(checkpoint["generator"])
 
     def forward(self, original, mask):
-        with torch.no_grad():
-            mean = self.mean_estimator(original, mask)
-            stdev = self.stdev_estimator(mean, mask)
-        return self.generator(mean, stdev, mask)
+        mean = self.mean_estimator(original, mask).detach()
+        stdev = self.stdev_estimator(mean, mask).detach()
+        noise = self.generator(mean, stdev, mask)
+        return noise_to_inpainting(noise, mean, stdev, mask)
+
+    def forward_with_intermediate(self, original, mask):
+        mean = self.mean_estimator(original, mask).detach()
+        stdev = self.stdev_estimator(mean, mask).detach()
+        noise = self.generator(mean, stdev, mask)
+        return noise_to_inpainting(noise, mean, stdev, mask), noise, mean, stdev
