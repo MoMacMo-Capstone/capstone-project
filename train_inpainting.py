@@ -15,10 +15,13 @@ def zero_centered_gradient_penalty(Samples, Critics):
     Gradient, = torch.autograd.grad(outputs=Critics.sum(), inputs=Samples, create_graph=True)
     return Gradient.square().sum([1, 2, 3]).mean()
 
-def generator_loss(discriminator, fake_imgs, real_imgs, mean, stdev, mask):
-    fake_logits = discriminator(fake_imgs, mean, stdev, mask)
+def generator_loss(discriminator, fake_noise, chunk, mean, stdev, mask):
+    real_imgs = chunk[:, slice_layers // 2:slice_layers // 2 + 1]
+    real_noise = inpainting_to_noise(real_imgs, mean, stdev, mask).detach()
+
+    fake_logits = discriminator(fake_noise, chunk, mean, stdev, mask)
     with torch.no_grad():
-        real_logits = discriminator(real_imgs, mean, stdev, mask)
+        real_logits = discriminator(real_noise, chunk, mean, stdev, mask)
 
     relativistic_logits = fake_logits - real_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
@@ -27,20 +30,22 @@ def generator_loss(discriminator, fake_imgs, real_imgs, mean, stdev, mask):
 
     return adversarial_loss
 
-def backward_discriminator_loss(discriminator, fake_imgs, real_imgs, mean, stdev, mask, gamma):
-    fake_imgs = fake_imgs.detach().requires_grad_(True)
-    real_imgs = real_imgs.detach().requires_grad_(True)
+def backward_discriminator_loss(discriminator, fake_noise, chunk, mean, stdev, mask, gamma):
+    fake_noise = fake_noise.detach().requires_grad_(True)
 
-    fake_logits = discriminator(fake_imgs, mean, stdev, mask)
-    real_logits = discriminator(real_imgs, mean, stdev, mask)
+    real_imgs = chunk[:, slice_layers // 2:slice_layers // 2 + 1]
+    real_noise = inpainting_to_noise(real_imgs, mean, stdev, mask).detach().requires_grad_(True)
+
+    fake_logits = discriminator(fake_noise, chunk, mean, stdev, mask)
+    real_logits = discriminator(real_noise, chunk, mean, stdev, mask)
 
     relativistic_logits = real_logits - fake_logits
     adversarial_loss = nn.functional.softplus(-relativistic_logits).mean()
     adversarial_loss.backward(retain_graph=True)
 
-    r1_penalty = zero_centered_gradient_penalty(real_imgs, real_logits)
+    r1_penalty = zero_centered_gradient_penalty(real_noise, real_logits)
     (r1_penalty * (gamma / 2)).backward()
-    r2_penalty = zero_centered_gradient_penalty(fake_imgs, fake_logits)
+    r2_penalty = zero_centered_gradient_penalty(fake_noise, fake_logits)
     (r2_penalty * (gamma / 2)).backward()
 
     writer.add_scalar("Loss/Discriminator Loss", adversarial_loss.item(), step)
@@ -87,8 +92,8 @@ print("D params:", sum(p.numel() for p in D.parameters()))
 writer = SummaryWriter()
 
 hparams = {
-    "G lr 0": 2.5e-5,
-    "G lr 1": 2.5e-6,
+    "G lr 0": 5e-5,
+    "G lr 1": 5e-6,
     "D lr 0": 1e-4,
     "D lr 1": 1e-5,
     "G beta2 0": 0.9,
@@ -104,8 +109,7 @@ hparams = {
     "G params": sum(p.numel() for p in G.parameters()),
     "D params": sum(p.numel() for p in D.parameters()),
 }
-# checkpoint = "m_std_128x128_32c_10000.ckpt"
-checkpoint = "inpainting_128x128_24c_3000.ckpt"
+checkpoint = "m_std_64x64_64c_10000.ckpt"
 
 if checkpoint:
     checkpoint = torch.load(checkpoint)
@@ -122,18 +126,8 @@ for name, value in hparams.items():
 optimizer_G = optim.AdamW(G.parameters(), lr=hparams["G lr 0"], betas=(0.0, hparams["G beta2 0"]))
 optimizer_D = optim.AdamW(D.parameters(), lr=hparams["D lr 0"], betas=(0.0, hparams["D beta2 0"]))
 
-# transform = transforms.Compose([
-    # transforms.ToTensor(),
-    # transforms.Normalize((0.5,), (0.5,))
-# ])
-# train_dataset = datasets.MNIST(root='data', train=True, download=True, transform=transform)
-# train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 fid_metric_acc = FrechetInceptionDistance(feature = 2048).to(device)
 fid_metric = FrechetInceptionDistance(feature = 2048).to(device)
-
-# mask = torch.zeros((batch_size, 1, 28, 28), device=device, dtype=torch.bool)
-# mask[:,:,:,9:21] = 1
-# mask[:,:,9:21,9:21] = 1
 
 while True:
     step += 1
@@ -154,36 +148,39 @@ while True:
         param_group['lr'] = D_lr
         param_group['betas'] = (0, D_beta2)
 
-    real_imgs = read_seismic_data.get_chunks(batch_size, resolution[0])
-    real_imgs = abs_normalize(torch.tensor(real_imgs, device=device))
-    real_imgs = real_imgs.detach().requires_grad_(True)
+    chunk = read_seismic_data.get_multilayer_chunks(batch_size, resolution[0], slice_layers)
+    chunk = abs_normalize(torch.tensor(chunk, device=device))
 
     mask = lama_mask.make_seismic_masks(batch_size, resolution)
     mask = torch.tensor(mask, device=device)
 
     with torch.no_grad():
-        mean = Mean(real_imgs, mask)
-        stdev = Stdev(mean, mask)
-    fake_imgs = G(mean, stdev, mask)
+        mean = Mean(chunk, mask)
+        stdev = Stdev(chunk, mean, mask)
+    fake_noise = G.forward_training(chunk, mean, stdev, mask)
+    fake_imgs = noise_to_inpainting(fake_noise, mean, stdev, mask)
+
+    real_imgs = chunk[:, slice_layers // 2:slice_layers // 2 + 1]
+    real_noise = inpainting_to_noise(real_imgs, mean, stdev, mask)
 
     writer.add_scalar("Metrics/L1 loss", (fake_imgs - real_imgs).abs().mean(), step)
     writer.add_scalar("Metrics/L2 loss", (fake_imgs - real_imgs).square().mean(), step)
 
     optimizer_G.zero_grad()
-    G_loss = generator_loss(D, fake_imgs, real_imgs, mean, stdev, mask)
+    G_loss = generator_loss(D, fake_noise, chunk, mean, stdev, mask)
     G_loss.backward()
     optimizer_G.step()
 
     optimizer_D.zero_grad()
-    D_loss = backward_discriminator_loss(D, fake_imgs, real_imgs, mean, stdev, mask, GP_gamma)
+    D_loss = backward_discriminator_loss(D, fake_noise, chunk, mean, stdev, mask, GP_gamma)
     optimizer_D.step()
 
     if step % 10 == 0:
         grid = torch.cat([
             real_imgs[:32, 0:1],
-            stdev[:32, 0:1],
             mean[:32, 0:1],
-            fake_imgs[:32, 0:1],
+            fake_noise[:32, 0:1],
+            real_noise[:32, 0:1],
         ], 0)
         grid = nn.functional.interpolate(grid, scale_factor=2, mode="nearest")
         grid = color_images(grid)
@@ -193,10 +190,10 @@ while True:
     print(f"Step {step}: D Loss: {D_loss:.05}, G Loss: {G_loss.item():.05}")
 
     if step % 100 == 0:
-        fid_metric_acc.update(prepare_for_fid(real_imgs), real = True)
+        fid_metric_acc.update(prepare_for_fid(real_noise), real = True)
         fid_metric.reset()
         fid_metric.merge_state(fid_metric_acc)
-        fid_metric.update(prepare_for_fid(fake_imgs), real = False)
+        fid_metric.update(prepare_for_fid(fake_noise), real = False)
         fid_score = fid_metric.compute()
         print(f"FID: {fid_score}")
         writer.add_scalar("Metrics/FID", fid_score.item(), step)

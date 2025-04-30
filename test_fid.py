@@ -26,6 +26,8 @@ device = torch.device("cpu")
 fid_metric_acc = FrechetInceptionDistance(feature = 2048).to(device)
 fid_metric = FrechetInceptionDistance(feature = 2048).to(device)
 
+exit()
+
 epoch = 0
 
 while True:

@@ -1,12 +1,23 @@
 import torch
 import torch.nn as nn
 
-resolution = (128, 128)
-latent_dim = 24
-mean_stdev_latent_dim = 32
+resolution = (64, 64)
+latent_dim = 64
+mean_stdev_latent_dim = 64
+slice_layers = 31
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cpu")
+
+def mask_to_multilayer(mask, layers):
+    out = torch.cat([torch.zeros_like(mask), mask], dim=1)
+    l1 = layers // 2
+    l2 = layers - l1
+    return out.repeat_interleave(torch.tensor([l1, l2], device=out.device), dim=1)
+
+def multilayer_mask(layers, mask):
+    mask = mask_to_multilayer(mask, layers.shape[1])
+    return layers.masked_fill(mask, 0)
 
 def pink_noise(shape):
     y = torch.fft.fftfreq(shape[2], device=device).view((1, 1, -1, 1))
@@ -21,16 +32,20 @@ def pink_noise(shape):
 def leaky_relu(z):
     return nn.functional.leaky_relu(z, 0.2)
 
-# def noise_to_inpainting(noise, mean, stdev, mask):
-    # inpainting = noise * stdev + mean
-    # return torch.where(mask, inpainting, mean)
+def noise_to_inpainting(noise, mean, stdev, mask):
+    inpainting = noise * stdev + mean
+    return torch.where(mask, inpainting, mean)
 
-# def inpainting_to_noise(image, mean, stdev, mask):
-    # noise = ((image - mean) / stdev).clamp(-3, 3)
-    # return noise.masked_fill(~mask, 0)
+def inpainting_to_noise(image, mean, stdev, mask):
+    noise = ((image - mean) / stdev).clamp(-3, 3)
+    return noise.masked_fill(~mask, 0)
+
+def inpainting_to_noise_unbounded(image, mean, stdev, mask):
+    noise = ((image - mean) / stdev)
+    return noise.masked_fill(~mask, 0)
 
 def abs_norm(images):
-    return images.abs().amax(2, keepdim=True).amax(3, keepdim=True) + 1e-9
+    return images.abs().amax(1, keepdim=True).amax(2, keepdim=True).amax(3, keepdim=True) + 1e-9
 
 def abs_normalize(images):
     return images / abs_norm(images)
@@ -107,34 +122,35 @@ class MeanEstimator(nn.Module):
     def __init__(self):
         super(MeanEstimator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(2, mean_stdev_latent_dim, 1, bias=False),
+            nn.Conv2d(1 + slice_layers, mean_stdev_latent_dim, 1, bias=False),
             UNET(mean_stdev_latent_dim, resolution),
             nn.Conv2d(mean_stdev_latent_dim, 1, 1, bias=False),
         )
 
     def forward(self, original, mask):
-        original = original.masked_fill(mask, 0)
+        original = multilayer_mask(original, mask)
         norm = abs_norm(original)
 
         inpainted = self.model(torch.cat([original / norm, mask], dim = 1))
         inpainted = inpainted * norm
 
-        return torch.where(mask, inpainted, original)
+        return torch.where(mask, inpainted, original[:, slice_layers // 2:slice_layers // 2 + 1])
 
 class VarEstimator(nn.Module):
     def __init__(self):
         super(VarEstimator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(2, mean_stdev_latent_dim, 1, bias=False),
+            nn.Conv2d(2 + slice_layers, mean_stdev_latent_dim, 1, bias=False),
             UNET(mean_stdev_latent_dim, resolution),
             nn.Conv2d(mean_stdev_latent_dim, 1, 1, bias=False),
         )
 
-    def forward(self, mean, mask):
-        norm = abs_norm(mean)
+    def forward(self, original, mean, mask):
+        original = multilayer_mask(original, mask)
+        norm = abs_norm(original)
 
-        output = self.model(torch.cat([mean / norm, mask], dim = 1))
-        output = output.abs() + 1e-9
+        output = self.model(torch.cat([original / norm, mean / norm, mask], dim = 1))
+        output = nn.functional.softplus(output)
         output = output * norm
 
         return output.masked_fill(~mask, 0)
@@ -143,30 +159,40 @@ class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
         self.model = nn.Sequential(
-            nn.Conv2d(3, latent_dim, 1, bias=False),
+            nn.Conv2d(3 + slice_layers, latent_dim, 1, bias=False),
             UNET(latent_dim, resolution, inject_noise=True),
             nn.Conv2d(latent_dim, 1, 1, bias=False),
         )
 
-    def forward(self, mean, stdev, mask):
-        norm = abs_norm(mean)
+    def forward(self, original, mean, stdev, mask):
+        original = multilayer_mask(original, mask)
+        norm = abs_norm(original)
 
-        inpainted = self.model(torch.cat([mean / norm, stdev / norm, mask], dim = 1))
+        noise = self.model(torch.cat([original / norm, mean / norm, stdev / norm, mask], dim = 1))
 
-        return torch.where(mask, inpainted, mean)
+        return noise_to_inpainting(noise, mean, stdev, mask)
+
+    def forward_training(self, original, mean, stdev, mask):
+        original = multilayer_mask(original, mask)
+        norm = abs_norm(original)
+
+        noise = self.model(torch.cat([original / norm, mean / norm, stdev / norm, mask], dim = 1))
+
+        return noise.masked_fill(~mask, 0)
 
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
 
         self.convs = nn.Sequential(
-            nn.Conv2d(4, latent_dim, 1, bias=False),
+            nn.Conv2d(4 + slice_layers, latent_dim, 1, bias=False),
             UNET(latent_dim, resolution),
         )
         self.linear = nn.Linear(latent_dim, 1)
 
-    def forward(self, img, mean, stdev, mask):
-        z = torch.cat([img, mean, stdev, mask], dim=1)
+    def forward(self, noise, original, mean, stdev, mask):
+        original = multilayer_mask(original, mask)
+        z = torch.cat([original, noise, mean, stdev, mask], dim=1)
         z = self.convs(z).mean((2, 3))
         return self.linear(z)
 
@@ -189,4 +215,4 @@ class CombinedGenerator(nn.Module):
         with torch.no_grad():
             mean = self.mean_estimator(original, mask)
             stdev = self.stdev_estimator(mean, mask)
-        return self.generator(mean, stdev, mask)
+            return self.generator(original, mean, stdev, mask)
